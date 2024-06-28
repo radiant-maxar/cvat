@@ -13,7 +13,9 @@ cvat:
     annotations: {}
     resources: {}
     affinity: {}
+    nodeSelector: {}
     tolerations: []
+    topologySpreadConstraints: []
     additionalEnv: []
     additionalVolumes: []
     additionalVolumeMounts: []
@@ -26,7 +28,9 @@ cvat:
       annotations: {}
       resources: {}
       affinity: {}
+      nodeSelector: {}
       tolerations: []
+      topologySpreadConstraints: []
       additionalEnv: []
       additionalVolumes: []
       additionalVolumeMounts: []
@@ -36,7 +40,9 @@ cvat:
       annotations: {}
       resources: {}
       affinity: {}
+      nodeSelector: {}
       tolerations: []
+      topologySpreadConstraints: []
       envs:
         ALLOWED_HOSTS: "*"
       additionalEnv: []
@@ -49,7 +55,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -59,7 +67,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -69,7 +79,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -79,7 +91,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -89,7 +103,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -99,7 +115,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
@@ -109,7 +127,9 @@ cvat:
       annotations: {}
       resources: {}
       affinity: {}
+      nodeSelector: {}
       tolerations: []
+      topologySpreadConstraints: []
       additionalEnv: []
       additionalVolumes: []
       additionalVolumeMounts: []
@@ -147,7 +167,9 @@ cvat:
     # test.io/test: test
     resources: {}
     affinity: {}
+    nodeSelector: {}
     tolerations: []
+    topologySpreadConstraints: []
     # nodeAffinity:
     #   requiredDuringSchedulingIgnoredDuringExecution:
     #     nodeSelectorTerms:
@@ -190,7 +212,9 @@ cvat:
     # test.io/test: test
     resources: {}
     affinity: {}
+    nodeSelector: {}
     tolerations: []
+    topologySpreadConstraints: []
     # nodeAffinity:
     #   requiredDuringSchedulingIgnoredDuringExecution:
     #     nodeSelectorTerms:
@@ -242,8 +266,10 @@ cvat:
     # test.io/test: test
     resources: {}
     affinity: {}
+    nodeSelector: {}
     tolerations: []
-    nodeAffinity: {}
+    topologySpreadConstraints: []
+    # nodeAffinity: {}
     #   requiredDuringSchedulingIgnoredDuringExecution:
     #     nodeSelectorTerms:
     #     - matchExpressions:

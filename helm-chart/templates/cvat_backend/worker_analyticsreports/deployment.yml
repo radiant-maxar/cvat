@@ -69,8 +69,16 @@ spec:
       affinity:
       {{- toYaml . | nindent 8 }}
       {{- end }}
+      {{- with merge $localValues.nodeSelector .Values.cvat.backend.nodeSelector }}
+      nodeSelector:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
       {{- with concat .Values.cvat.backend.tolerations $localValues.tolerations }}
       tolerations:
+      {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with concat .Values.cvat.backend.topologySpreadConstraints $localValues.topologySpreadConstraints }}
+      topologySpreadConstraints:
       {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with concat .Values.cvat.backend.additionalVolumes $localValues.additionalVolumes }}
