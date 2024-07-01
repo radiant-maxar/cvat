@@ -145,27 +145,27 @@ The name of the service account to use for backend pods
 - name: CLICKHOUSE_HOST
   valueFrom:
     secretKeyRef:
-      name: cvat-analytics-secret
+      name: {{ .Values.analytics.secret.name }}
       key: CLICKHOUSE_HOST
 - name: CLICKHOUSE_PORT
   valueFrom:
     secretKeyRef:
-      name: cvat-analytics-secret
+      name: {{ .Values.analytics.secret.name }}
       key: CLICKHOUSE_PORT
 - name: CLICKHOUSE_DB
   valueFrom:
     secretKeyRef:
-      name: cvat-analytics-secret
+      name: {{ .Values.analytics.secret.name }}
       key: CLICKHOUSE_DB
 - name: CLICKHOUSE_USER
   valueFrom:
     secretKeyRef:
-      name: cvat-analytics-secret
+      name: {{ .Values.analytics.secret.name }}
       key: CLICKHOUSE_USER
 - name: CLICKHOUSE_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: cvat-analytics-secret
+      name: {{ .Values.analytics.secret.name }}
       key: CLICKHOUSE_PASSWORD
 {{- end }}
 {{- end }}
