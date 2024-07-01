@@ -354,6 +354,9 @@ analytics:
   clickhousePassword: user
   clickhouseHost: "{{ .Release.Name }}-clickhouse"
   clickhousePort: 8123
+  secret:
+    create: true
+    name: cvat-analytics-secret
 
 vector:
   envFrom:
