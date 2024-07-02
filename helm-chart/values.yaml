@@ -374,8 +374,6 @@ vector:
       - name: http
         port: 80
         protocol: TCP
-  image:
-    tag: "0.26.0-alpine"
 
 clickhouse:
   # Set to false in case of external db usage
