@@ -27,7 +27,7 @@ appVersion: latest
 
 dependencies:
   - name: postgresql
-    version: "12.1.*"
+    version: 12.1.15
     repository: https://charts.bitnami.com/bitnami
     condition: postgresql.enabled
 
@@ -42,12 +42,12 @@ dependencies:
     condition: analytics.enabled
 
   - name: clickhouse
-    version: "4.1.*"
+    version: 4.1.16
     repository: https://charts.bitnami.com/bitnami
     condition: clickhouse.enabled
 
   - name: grafana
-    version: "6.60.*"
+    version: 6.60.6
     repository: https://grafana.github.io/helm-charts
     condition: analytics.enabled
 
