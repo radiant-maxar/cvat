@@ -35,6 +35,7 @@ from cvat.apps.engine.frame_provider import FrameProvider
 from cvat.apps.engine.models import (AttributeSpec, AttributeType, Data, DimensionType, Job,
                                      JobType, Label, LabelType, Project, SegmentType, ShapeType,
                                      Task)
+from cvat.apps.engine.rq_job_handler import RQJobMetaField
 
 from .annotation import AnnotationIR, AnnotationManager, TrackManager
 from .formats.transformations import MaskConverter, EllipsesToMasks
@@ -199,7 +200,7 @@ class CommonData(InstanceLabelData):
     Tag = namedtuple('Tag', 'frame, label, attributes, source, group, id')
     Tag.__new__.__defaults__ = (0, None)
     Frame = namedtuple(
-        'Frame', 'idx, id, frame, name, width, height, labeled_shapes, tags, shapes, labels')
+        'Frame', 'idx, id, frame, name, width, height, labeled_shapes, tags, shapes, labels, subset')
     Label = namedtuple('Label', 'id, name, color, type')
 
     def __init__(self,
@@ -222,6 +223,7 @@ class CommonData(InstanceLabelData):
         self._db_data = db_task.data
         self._use_server_track_ids = use_server_track_ids
         self._required_frames = included_frames
+        self._db_subset = db_task.subset
 
         super().__init__(db_task)
 
@@ -267,6 +269,7 @@ class CommonData(InstanceLabelData):
                     "path": "frame_{:06d}".format(self.abs_frame_id(frame)),
                     "width": self._db_data.video.width,
                     "height": self._db_data.video.height,
+                    "subset": self._db_subset,
                 } for frame in self.rel_range
             }
         else:
@@ -277,6 +280,7 @@ class CommonData(InstanceLabelData):
                     "path": db_image.path,
                     "width": db_image.width,
                     "height": db_image.height,
+                    "subset": self._db_subset,
                 } for db_image in queryset
             }
 
@@ -408,6 +412,7 @@ class CommonData(InstanceLabelData):
                 frames[frame] = CommonData.Frame(
                     idx=idx,
                     id=frame_info.get("id", 0),
+                    subset=frame_info["subset"],
                     frame=frame,
                     name=frame_info["path"],
                     height=frame_info["height"],
@@ -530,7 +535,13 @@ class CommonData(InstanceLabelData):
                 self.soft_attribute_import and attrib.name not in CVAT_INTERNAL_ATTRIBUTES
             )
         ]
-        _shape['points'] = list(map(float, _shape['points']))
+
+        # TODO: remove once importers are guaranteed to return correct type
+        # (see https://github.com/cvat-ai/cvat/pull/8226/files#r1695445137)
+        points = _shape["points"]
+        for i, point in enumerate(map(float, points)):
+            points[i] = point
+
         _shape['elements'] = [self._import_shape(element, label_id) for element in _shape.get('elements', [])]
 
         return _shape
@@ -556,7 +567,11 @@ class CommonData(InstanceLabelData):
                 for attrib in shape['attributes']
                 if self._get_mutable_attribute_id(label_id, attrib.name)
             ]
-            shape['points'] = list(map(float, shape['points']))
+        # TODO: remove once importers are guaranteed to return correct type
+        # (see https://github.com/cvat-ai/cvat/pull/8226/files#r1695445137)
+            points = shape["points"]
+            for i, point in enumerate(map(float, points)):
+                points[i] = point
 
         return _track
 
@@ -1486,12 +1501,14 @@ class CvatTaskOrJobDataExtractor(dm.SourceExtractor, CVATDataExtractorMixin):
         dimension: DimensionType = DimensionType.DIM_2D,
         **kwargs
     ):
+        instance_meta = instance_data.meta[instance_data.META_FIELD]
         dm.SourceExtractor.__init__(
-            self, media_type=dm.Image if dimension == DimensionType.DIM_2D else PointCloud
+            self,
+            media_type=dm.Image if dimension == DimensionType.DIM_2D else PointCloud,
+            subset=instance_meta['subset'],
         )
         CVATDataExtractorMixin.__init__(self, **kwargs)
 
-        instance_meta = instance_data.meta[instance_data.META_FIELD]
         self._categories = self._load_categories(instance_meta['labels'])
         self._user = self._load_user_info(instance_meta) if dimension == DimensionType.DIM_3D else {}
         self._dimension = dimension
@@ -1526,6 +1543,7 @@ class CvatTaskOrJobDataExtractor(dm.SourceExtractor, CVATDataExtractorMixin):
                 dm_item = dm.DatasetItem(
                         id=osp.splitext(frame_data.name)[0],
                         annotations=dm_anno, media=dm_image,
+                        subset=frame_data.subset,
                         attributes={'frame': frame_data.frame
                     })
             elif dimension == DimensionType.DIM_3D:
@@ -1542,7 +1560,7 @@ class CvatTaskOrJobDataExtractor(dm.SourceExtractor, CVATDataExtractorMixin):
                 dm_item = dm.DatasetItem(
                     id=osp.splitext(osp.split(frame_data.name)[-1])[0],
                     annotations=dm_anno, media=PointCloud(dm_image[0]), related_images=dm_image[1],
-                    attributes=attributes
+                    attributes=attributes, subset=frame_data.subset,
                 )
 
             dm_items.append(dm_item)
@@ -2241,8 +2259,8 @@ def load_dataset_data(project_annotation, dataset: dm.Dataset, project_data):
                 raise CvatImportError(f'Target project does not have label with name "{label.name}"')
     for subset_id, subset in enumerate(dataset.subsets().values()):
         job = rq.get_current_job()
-        job.meta['status'] = 'Task from dataset is being created...'
-        job.meta['progress'] = (subset_id + job.meta.get('task_progress', 0.)) / len(dataset.subsets().keys())
+        job.meta[RQJobMetaField.STATUS] = 'Task from dataset is being created...'
+        job.meta[RQJobMetaField.PROGRESS] = (subset_id + job.meta.get(RQJobMetaField.TASK_PROGRESS, 0.)) / len(dataset.subsets().keys())
         job.save_meta()
 
         task_fields = {
