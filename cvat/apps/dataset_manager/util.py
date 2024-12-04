@@ -8,11 +8,12 @@ import os
 import os.path as osp
 import re
 import zipfile
+from collections.abc import Generator, Sequence
 from contextlib import contextmanager
 from copy import deepcopy
 from datetime import timedelta
 from threading import Lock
-from typing import Any, Generator, Optional, Sequence
+from typing import Any, Optional
 
 import attrs
 import django_rq
@@ -81,13 +82,15 @@ def get_cached(queryset: models.QuerySet, pk: int) -> models.Model:
 
     return result
 
-def deepcopy_simple(v):
-    # Default deepcopy is very slow
+def faster_deepcopy(v):
+    "A slightly optimized version of the default deepcopy, can be used as a drop-in replacement."
+    # Default deepcopy is very slow, here we do shallow copy for primitive types and containers
 
-    if isinstance(v, dict):
-        return {k: deepcopy_simple(vv) for k, vv in v.items()}
-    elif isinstance(v, (list, tuple, set)):
-        return type(v)(deepcopy_simple(vv) for vv in v)
+    t = type(v)
+    if t is dict:
+        return {k: faster_deepcopy(vv) for k, vv in v.items()}
+    elif t in (list, tuple, set):
+        return t(faster_deepcopy(vv) for vv in v)
     elif isinstance(v, (int, float, str, bool)) or v is None:
         return v
     else:

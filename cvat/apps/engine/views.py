@@ -3,31 +3,32 @@
 #
 # SPDX-License-Identifier: MIT
 
+import functools
+import itertools
 import os
 import os.path as osp
 import re
 import shutil
-import functools
-
+import textwrap
+import traceback
+import zlib
+from abc import ABCMeta, abstractmethod
 from contextlib import suppress
 from PIL import Image
 from types import SimpleNamespace
-from typing import Optional, Any, Dict, List, cast, Callable, Mapping, Iterable
-import traceback
-import textwrap
+from typing import Optional, Any, Dict, List, Union, cast, Callable, Mapping, Iterable
 from collections import namedtuple
 from copy import copy
 from datetime import datetime
 from redis.exceptions import ConnectionError as RedisConnectionError
 from tempfile import NamedTemporaryFile
-from textwrap import dedent
 
 import django_rq
 from attr.converters import to_bool
 from django.conf import settings
 from django.contrib.auth.models import User
 from django.db import IntegrityError, transaction
-from django.db.models import Count
+from django.db import models as django_models
 from django.db.models.query import Prefetch
 from django.http import HttpResponse, HttpRequest, HttpResponseNotFound, HttpResponseBadRequest
 from django.utils import timezone
@@ -37,7 +38,7 @@ from django_rq.queues import DjangoRQ
 
 from drf_spectacular.types import OpenApiTypes
 from drf_spectacular.utils import (
-    OpenApiParameter, OpenApiResponse, PolymorphicProxySerializer,
+    OpenApiExample, OpenApiParameter, OpenApiResponse, PolymorphicProxySerializer,
     extend_schema_view, extend_schema
 )
 
@@ -58,29 +59,33 @@ from cvat.apps.engine.cloud_provider import db_storage_to_storage_instance, impo
 from cvat.apps.events.handlers import handle_dataset_import
 from cvat.apps.dataset_manager.bindings import CvatImportError
 from cvat.apps.dataset_manager.serializers import DatasetFormatsSerializer
-from cvat.apps.engine.frame_provider import FrameProvider
+from cvat.apps.engine.frame_provider import (
+    DataWithMeta, IFrameProvider, TaskFrameProvider, JobFrameProvider, FrameQuality
+)
 from cvat.apps.engine.filters import NonModelSimpleFilter, NonModelOrderingFilter, NonModelJsonLogicFilter
 from cvat.apps.engine.media_extractors import get_mime
 from cvat.apps.engine.permissions import AnnotationGuidePermission, get_iam_context
 from cvat.apps.engine.models import (
-    ClientFile, Job, JobType, Label, SegmentType, Task, Project, Issue, Data,
+    ClientFile, Job, JobType, Label, Task, Project, Issue, Data,
     Comment, StorageMethodChoice, StorageChoice,
     CloudProviderChoice, Location, CloudStorage as CloudStorageModel,
-    Asset, AnnotationGuide)
+    Asset, AnnotationGuide, RequestStatus, RequestAction, RequestTarget, RequestSubresource
+)
 from cvat.apps.engine.serializers import (
     AboutSerializer, AnnotationFileSerializer, BasicUserSerializer,
-    DataMetaReadSerializer, DataMetaWriteSerializer, DataSerializer,
-    FileInfoSerializer, JobReadSerializer, JobWriteSerializer, LabelSerializer,
-    LabeledDataSerializer,
+    DataMetaReadSerializer, DataMetaWriteSerializer, DataSerializer, FileInfoSerializer,
+    JobDataMetaWriteSerializer, JobReadSerializer, JobWriteSerializer,
+    JobValidationLayoutReadSerializer, JobValidationLayoutWriteSerializer,
+    LabelSerializer, LabeledDataSerializer,
     ProjectReadSerializer, ProjectWriteSerializer,
-    RqStatusSerializer, TaskReadSerializer, TaskWriteSerializer,
+    RqStatusSerializer, TaskReadSerializer, TaskValidationLayoutReadSerializer, TaskValidationLayoutWriteSerializer, TaskWriteSerializer,
     UserSerializer, PluginsSerializer, IssueReadSerializer,
     AnnotationGuideReadSerializer, AnnotationGuideWriteSerializer,
     AssetReadSerializer, AssetWriteSerializer,
     IssueWriteSerializer, CommentReadSerializer, CommentWriteSerializer, CloudStorageWriteSerializer,
     CloudStorageReadSerializer, DatasetFileSerializer,
     ProjectFileSerializer, TaskFileSerializer, RqIdSerializer, CloudStorageContentSerializer,
-    RequestSerializer, RequestStatus, RequestAction, RequestSubresource,
+    RequestSerializer,
 )
 from cvat.apps.engine.permissions import get_cloud_storage_for_import_or_export
 
@@ -90,7 +95,7 @@ from cvat.apps.engine.utils import (
     parse_exception_message, get_rq_job_meta,
     import_resource_with_clean_up_after, sendfile, define_dependent_job, get_rq_lock_by_user,
 )
-from cvat.apps.engine.rq_job_handler import RQIdManager, is_rq_job_owner, RQJobMetaField
+from cvat.apps.engine.rq_job_handler import RQId, is_rq_job_owner, RQJobMetaField
 from cvat.apps.engine import backup
 from cvat.apps.engine.mixins import (
     PartialUpdateModelMixin, UploadMixin, DatasetMixin, BackupMixin, CsrfWorkaroundMixin
@@ -101,7 +106,7 @@ from . import models, task
 from .log import ServerLogManager
 from cvat.apps.iam.filters import ORGANIZATION_OPEN_API_PARAMETERS
 from cvat.apps.iam.permissions import PolicyEnforcer, IsAuthenticatedOrReadPublicResource
-from cvat.apps.engine.cache import MediaCache
+from cvat.apps.engine.cache import MediaCache, CvatChunkTimestampMismatchError, LockError
 from cvat.apps.engine.permissions import (CloudStoragePermission,
     CommentPermission, IssuePermission, JobPermission, LabelPermission, ProjectPermission,
     TaskPermission, UserPermission)
@@ -110,6 +115,10 @@ from cvat.apps.engine.view_utils import tus_chunk_action
 slogger = ServerLogManager(__name__)
 
 _UPLOAD_PARSER_CLASSES = api_settings.DEFAULT_PARSER_CLASSES + [MultiPartParser]
+
+_DATA_CHECKSUM_HEADER_NAME = 'X-Checksum'
+_DATA_UPDATED_DATE_HEADER_NAME = 'X-Updated-Date'
+_RETRY_AFTER_TIMEOUT = 10
 
 @extend_schema(tags=['server'])
 class ServerViewSet(viewsets.ViewSet):
@@ -218,7 +227,7 @@ class ServerViewSet(viewsets.ViewSet):
     def plugins(request):
         data = {
             'GIT_INTEGRATION': False, # kept for backwards compatibility
-            'ANALYTICS': to_bool(os.environ.get("CVAT_ANALYTICS", False)),
+            'ANALYTICS': settings.ANALYTICS_ENABLED,
             'MODELS': to_bool(os.environ.get("CVAT_SERVERLESS", False)),
             'PREDICT': False, # FIXME: it is unused anymore (for UI only)
         }
@@ -279,8 +288,8 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     ordering = "-id"
     lookup_fields = {'owner': 'owner__username', 'assignee': 'assignee__username'}
     iam_organization_field = 'organization'
-    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
-        'import', 'project', {}, subresource='dataset'
+    IMPORT_RQ_ID_FACTORY = functools.partial(RQId,
+        RequestAction.IMPORT, RequestTarget.PROJECT, subresource=RequestSubresource.DATASET
     )
 
     def get_serializer_class(self):
@@ -401,7 +410,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 db_obj=self._object,
                 import_func=_import_project_dataset,
                 rq_func=dm.project.import_dataset_as_project,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE
+                rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
             )
         else:
             action = request.query_params.get("action", "").lower()
@@ -467,7 +476,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             return _import_project_dataset(
                 request=request,
                 filename=uploaded_file,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
                 rq_func=dm.project.import_dataset_as_project,
                 db_obj=self._object,
                 format_name=format_name,
@@ -490,7 +499,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         return Response(data='Unknown upload was finished',
                         status=status.HTTP_400_BAD_REQUEST)
 
-    @extend_schema(summary='Get project annotations or export them as a dataset',
+    @extend_schema(summary='Export project annotations as a dataset',
         description=textwrap.dedent("""\
             Deprecation warning:
 
@@ -534,11 +543,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     def annotations(self, request, pk):
         # FUTURE-TODO: mark exporting dataset using this endpoint as deprecated when new API for result file downloading will be implemented
         self._object = self.get_object() # force call of check_object_permissions()
-        return self.export_dataset_v1(
-            request=request,
-            save_images=False,
-            get_data=dm.task.get_job_data,
-        )
+        return self.export_dataset_v1(request=request, save_images=False)
 
     @extend_schema(summary='Back up a project',
         description=textwrap.dedent("""\
@@ -634,19 +639,17 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     def preview(self, request, pk):
         self._object = self.get_object() # call check_object_permissions as well
 
-        first_task = self._object.tasks.select_related('data__video').order_by('-id').first()
+        first_task: Optional[models.Task] = self._object.tasks.order_by('-id').first()
         if not first_task:
             return HttpResponseNotFound('Project image preview not found')
 
-        data_getter = DataChunkGetter(
+        data_getter = _TaskDataGetter(
+            db_task=first_task,
             data_type='preview',
             data_quality='compressed',
-            data_num=first_task.data.start_frame,
-            task_dim=first_task.dimension
         )
 
-        return data_getter(request, first_task.data.start_frame,
-           first_task.data.stop_frame, first_task.data)
+        return data_getter()
 
     @staticmethod
     def _get_rq_response(queue, job_id):
@@ -666,80 +669,54 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
 
         return response
 
-class DataChunkGetter:
-    def __init__(self, data_type, data_num, data_quality, task_dim):
+class _DataGetter(metaclass=ABCMeta):
+    def __init__(
+        self, data_type: str, data_num: Optional[Union[str, int]], data_quality: str
+    ) -> None:
         possible_data_type_values = ('chunk', 'frame', 'preview', 'context_image')
         possible_quality_values = ('compressed', 'original')
 
         if not data_type or data_type not in possible_data_type_values:
             raise ValidationError('Data type not specified or has wrong value')
         elif data_type == 'chunk' or data_type == 'frame' or data_type == 'preview':
-            if data_num is None:
+            if data_num is None and data_type != 'preview':
                 raise ValidationError('Number is not specified')
             elif data_quality not in possible_quality_values:
                 raise ValidationError('Wrong quality value')
 
         self.type = data_type
         self.number = int(data_num) if data_num is not None else None
-        self.quality = FrameProvider.Quality.COMPRESSED \
-            if data_quality == 'compressed' else FrameProvider.Quality.ORIGINAL
+        self.quality = FrameQuality.COMPRESSED \
+            if data_quality == 'compressed' else FrameQuality.ORIGINAL
 
-        self.dimension = task_dim
+    @abstractmethod
+    def _get_frame_provider(self) -> IFrameProvider: ...
 
-    def _check_frame_range(self, frame: int):
-        frame_range = range(self._start, self._stop + 1, self._db_data.get_frame_step())
-        if frame not in frame_range:
-            raise ValidationError(
-                f'The frame number should be in the [{self._start}, {self._stop}] range'
-            )
-
-    def __call__(self, request, start: int, stop: int, db_data: Optional[Data]):
-        if not db_data:
-            raise NotFound(detail='Cannot find requested data')
-
-        self._start = start
-        self._stop = stop
-        self._db_data = db_data
-
-        frame_provider = FrameProvider(db_data, self.dimension)
+    def __call__(self):
+        frame_provider = self._get_frame_provider()
 
         try:
             if self.type == 'chunk':
-                start_chunk = frame_provider.get_chunk_number(start)
-                stop_chunk = frame_provider.get_chunk_number(stop)
-                # pylint: disable=superfluous-parens
-                if not (start_chunk <= self.number <= stop_chunk):
-                    raise ValidationError('The chunk number should be in  the ' +
-                        f'[{start_chunk}, {stop_chunk}] range')
-
-                # TODO: av.FFmpegError processing
-                if settings.USE_CACHE and db_data.storage_method == StorageMethodChoice.CACHE:
-                    buff, mime_type = frame_provider.get_chunk(self.number, self.quality)
-                    return HttpResponse(buff.getvalue(), content_type=mime_type)
-
-                # Follow symbol links if the chunk is a link on a real image otherwise
-                # mimetype detection inside sendfile will work incorrectly.
-                path = os.path.realpath(frame_provider.get_chunk(self.number, self.quality))
-                return sendfile(request, path)
+                data = frame_provider.get_chunk(self.number, quality=self.quality)
+                return HttpResponse(
+                    data.data.getvalue(),
+                    content_type=data.mime,
+                    headers=self._get_chunk_response_headers(data),
+                )
             elif self.type == 'frame' or self.type == 'preview':
-                self._check_frame_range(self.number)
-
                 if self.type == 'preview':
-                    cache = MediaCache(self.dimension)
-                    buf, mime = cache.get_local_preview_with_mime(self.number, db_data)
+                    data = frame_provider.get_preview()
                 else:
-                    buf, mime = frame_provider.get_frame(self.number, self.quality)
+                    data = frame_provider.get_frame(self.number, quality=self.quality)
 
-                return HttpResponse(buf.getvalue(), content_type=mime)
+                return HttpResponse(data.data.getvalue(), content_type=data.mime)
 
             elif self.type == 'context_image':
-                self._check_frame_range(self.number)
-
-                cache = MediaCache(self.dimension)
-                buff, mime = cache.get_frame_context_images(db_data, self.number)
-                if not buff:
+                data = frame_provider.get_frame_context_images_chunk(self.number)
+                if not data:
                     return HttpResponseNotFound()
-                return HttpResponse(buff, content_type=mime)
+
+                return HttpResponse(data.data, content_type=data.mime)
             else:
                 return Response(data='unknown data type {}.'.format(self.type),
                     status=status.HTTP_400_BAD_REQUEST)
@@ -747,44 +724,122 @@ class DataChunkGetter:
             msg = str(ex) if not isinstance(ex, ValidationError) else \
                 '\n'.join([str(d) for d in ex.detail])
             return Response(data=msg, status=ex.status_code)
+        except (TimeoutError, CvatChunkTimestampMismatchError, LockError):
+            return Response(
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+                headers={'Retry-After': _RETRY_AFTER_TIMEOUT},
+            )
+
+    @abstractmethod
+    def _get_chunk_response_headers(self, chunk_data: DataWithMeta) -> dict[str, str]: ...
+
+    _CHUNK_HEADER_BYTES_LENGTH = 1000
+    "The number of significant bytes from the chunk header, used for checksum computation"
+
+    def _get_chunk_checksum(self, chunk_data: DataWithMeta) -> str:
+        data = chunk_data.data.getbuffer()
+        size_checksum = zlib.crc32(str(len(data)).encode())
+        return str(zlib.crc32(data[:self._CHUNK_HEADER_BYTES_LENGTH], size_checksum))
+
+    def _make_chunk_response_headers(self, checksum: str, updated_date: datetime) -> dict[str, str]:
+        return {
+            _DATA_CHECKSUM_HEADER_NAME: str(checksum or ''),
+            _DATA_UPDATED_DATE_HEADER_NAME: serializers.DateTimeField().to_representation(updated_date),
+        }
+
+class _TaskDataGetter(_DataGetter):
+    def __init__(
+        self,
+        db_task: models.Task,
+        *,
+        data_type: str,
+        data_quality: str,
+        data_num: Optional[Union[str, int]] = None,
+    ) -> None:
+        super().__init__(data_type=data_type, data_num=data_num, data_quality=data_quality)
+        self._db_task = db_task
+
+    def _get_frame_provider(self) -> TaskFrameProvider:
+        return TaskFrameProvider(self._db_task)
+
+    def _get_chunk_response_headers(self, chunk_data: DataWithMeta) -> dict[str, str]:
+        return self._make_chunk_response_headers(
+            self._get_chunk_checksum(chunk_data), self._db_task.get_chunks_updated_date(),
+        )
 
 
-class JobDataGetter(DataChunkGetter):
-    def __init__(self, job: Job, data_type, data_num, data_quality):
-        super().__init__(data_type, data_num, data_quality, task_dim=job.segment.task.dimension)
-        self.job = job
+class _JobDataGetter(_DataGetter):
+    def __init__(
+        self,
+        db_job: models.Job,
+        *,
+        data_type: str,
+        data_quality: str,
+        data_num: Optional[Union[str, int]] = None,
+        data_index: Optional[Union[str, int]] = None,
+    ) -> None:
+        possible_data_type_values = ('chunk', 'frame', 'preview', 'context_image')
+        possible_quality_values = ('compressed', 'original')
 
-    def _check_frame_range(self, frame: int):
-        frame_range = self.job.segment.frame_set
-        if frame not in frame_range:
-            raise ValidationError("The frame number doesn't belong to the job")
+        if not data_type or data_type not in possible_data_type_values:
+            raise ValidationError('Data type not specified or has wrong value')
+        elif data_type == 'chunk' or data_type == 'frame' or data_type == 'preview':
+            if data_type == 'chunk':
+                if data_num is None and data_index is None:
+                    raise ValidationError('Number or Index is not specified')
+                if data_num is not None and data_index is not None:
+                    raise ValidationError('Number and Index cannot be used together')
+            elif data_num is None and data_type != 'preview':
+                raise ValidationError('Number is not specified')
+            elif data_quality not in possible_quality_values:
+                raise ValidationError('Wrong quality value')
 
-    def __call__(self, request, start, stop, db_data):
-        if self.type == 'chunk' and self.job.segment.type == SegmentType.SPECIFIC_FRAMES:
-            frame_provider = FrameProvider(db_data, self.dimension)
+        self.type = data_type
 
-            start_chunk = frame_provider.get_chunk_number(start)
-            stop_chunk = frame_provider.get_chunk_number(stop)
-            # pylint: disable=superfluous-parens
-            if not (start_chunk <= self.number <= stop_chunk):
-                raise ValidationError('The chunk number should be in the ' +
-                    f'[{start_chunk}, {stop_chunk}] range')
+        self.index = int(data_index) if data_index is not None else None
+        self.number = int(data_num) if data_num is not None else None
 
-            cache = MediaCache()
+        self.quality = FrameQuality.COMPRESSED \
+            if data_quality == 'compressed' else FrameQuality.ORIGINAL
 
-            if settings.USE_CACHE and db_data.storage_method == StorageMethodChoice.CACHE:
-                buf, mime = cache.get_selective_job_chunk_data_with_mime(
-                    chunk_number=self.number, quality=self.quality, job=self.job
+        self._db_job = db_job
+
+    def _get_frame_provider(self) -> JobFrameProvider:
+        return JobFrameProvider(self._db_job)
+
+    def __call__(self):
+        if self.type == 'chunk':
+            # Reproduce the task chunk indexing
+            frame_provider = self._get_frame_provider()
+
+            try:
+                if self.index is not None:
+                    data = frame_provider.get_chunk(
+                        self.index, quality=self.quality, is_task_chunk=False
+                    )
+                else:
+                    data = frame_provider.get_chunk(
+                        self.number, quality=self.quality, is_task_chunk=True
+                    )
+
+                return HttpResponse(
+                    data.data.getvalue(),
+                    content_type=data.mime,
+                    headers=self._get_chunk_response_headers(data),
                 )
-            else:
-                buf, mime = cache.prepare_selective_job_chunk(
-                    chunk_number=self.number, quality=self.quality, db_job=self.job
+            except (TimeoutError, CvatChunkTimestampMismatchError, LockError):
+                return Response(
+                    status=status.HTTP_429_TOO_MANY_REQUESTS,
+                    headers={'Retry-After': _RETRY_AFTER_TIMEOUT},
                 )
-
-            return HttpResponse(buf.getvalue(), content_type=mime)
-
         else:
-            return super().__call__(request, start, stop, db_data)
+            return super().__call__()
+
+    def _get_chunk_response_headers(self, chunk_data: DataWithMeta) -> dict[str, str]:
+        return self._make_chunk_response_headers(
+            self._get_chunk_checksum(chunk_data),
+            self._db_job.segment.chunks_updated_date
+        )
 
 
 @extend_schema(tags=['tasks'])
@@ -829,25 +884,31 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     PartialUpdateModelMixin, UploadMixin, DatasetMixin, BackupMixin, CsrfWorkaroundMixin
 ):
     queryset = Task.objects.select_related(
-        'data', 'assignee', 'owner',
-        'target_storage', 'source_storage', 'annotation_guide',
+        'data',
+        'data__validation_layout',
+        'assignee',
+        'owner',
+        'target_storage',
+        'source_storage',
+        'annotation_guide',
     ).prefetch_related(
         'segment_set__job_set',
         'segment_set__job_set__assignee',
-    ).with_job_summary().all()
+    ).with_job_summary()
 
     lookup_fields = {
         'project_name': 'project__name',
         'owner': 'owner__username',
         'assignee': 'assignee__username',
         'tracker_link': 'bug_tracker',
+        'validation_mode': 'data__validation_layout__mode',
     }
     search_fields = (
         'project_name', 'name', 'owner', 'status', 'assignee',
-        'subset', 'mode', 'dimension', 'tracker_link'
+        'subset', 'mode', 'dimension', 'tracker_link', 'validation_mode'
     )
     filter_fields = list(search_fields) + ['id', 'project_id', 'updated_date']
-    filter_description = dedent("""
+    filter_description = textwrap.dedent("""
 
         There are few examples for complex filtering tasks:\n
             - Get all tasks from 1,2,3 projects - { "and" : [{ "in" : [{ "var" : "project_id" }, [1, 2, 3]]}]}\n
@@ -857,8 +918,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     ordering_fields = list(filter_fields)
     ordering = "-id"
     iam_organization_field = 'organization'
-    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
-        'import', 'task', {}, subresource='annotations'
+    IMPORT_RQ_ID_FACTORY = functools.partial(RQId,
+        RequestAction.IMPORT, RequestTarget.TASK, subresource=RequestSubresource.ANNOTATIONS,
     )
 
     def get_serializer_class(self):
@@ -1085,7 +1146,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 return _import_annotations(
                         request=request,
                         filename=annotation_file,
-                        rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                        rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
                         rq_func=dm.task.import_task_annotations,
                         db_obj=self._object,
                         format_name=format_name,
@@ -1113,9 +1174,15 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 # Create a temporary copy of the parameters we will try to create the task with
                 data = copy(serializer.data)
 
-                for optional_field in ['job_file_mapping', 'server_files_exclude']:
+                for optional_field in ['job_file_mapping', 'server_files_exclude', 'validation_params']:
                     if optional_field in serializer.validated_data:
                         data[optional_field] = serializer.validated_data[optional_field]
+
+                if validation_params := getattr(db_data, 'validation_params', None):
+                    data['validation_params']['frames'] = set(itertools.chain(
+                        data['validation_params'].get('frames', []),
+                        validation_params.frames.values_list('path', flat=True).all()
+                    ))
 
                 if (
                     data['sorting_method'] == models.SortingMethod.PREDEFINED
@@ -1276,6 +1343,18 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 description="Specifies the quality level of the requested data"),
             OpenApiParameter('number', location=OpenApiParameter.QUERY, required=False, type=OpenApiTypes.INT,
                 description="A unique number value identifying chunk or frame"),
+            OpenApiParameter(
+                _DATA_CHECKSUM_HEADER_NAME,
+                location=OpenApiParameter.HEADER, type=OpenApiTypes.STR, required=False,
+                response=[200],
+                description="Data checksum, applicable for chunks only",
+            ),
+            OpenApiParameter(
+                _DATA_UPDATED_DATE_HEADER_NAME,
+                location=OpenApiParameter.HEADER, type=OpenApiTypes.DATETIME, required=False,
+                response=[200],
+                description="Data update date, applicable for chunks only",
+            )
         ],
         responses={
             '200': OpenApiResponse(description='Data of a specific type'),
@@ -1309,11 +1388,10 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             data_num = request.query_params.get('number', None)
             data_quality = request.query_params.get('quality', 'compressed')
 
-            data_getter = DataChunkGetter(data_type, data_num, data_quality,
-                self._object.dimension)
-
-            return data_getter(request, self._object.data.start_frame,
-                self._object.data.stop_frame, self._object.data)
+            data_getter = _TaskDataGetter(
+                self._object, data_type=data_type, data_num=data_num, data_quality=data_quality
+            )
+            return data_getter()
 
     @tus_chunk_action(detail=True, suffix_base="data")
     def append_data_chunk(self, request, pk, file_id):
@@ -1456,7 +1534,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 db_obj=self._object,
                 import_func=_import_annotations,
                 rq_func=dm.task.import_task_annotations,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE
+                rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
             )
         elif request.method == 'PUT':
             format_name = request.query_params.get('format', '')
@@ -1468,7 +1546,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 )
                 return _import_annotations(
                     request=request,
-                    rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                    rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
                     rq_func=dm.task.import_task_annotations,
                     db_obj=self._object,
                     format_name=format_name,
@@ -1514,10 +1592,10 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     )
     @action(detail=True, methods=['GET'], serializer_class=RqStatusSerializer)
     def status(self, request, pk):
-        self.get_object() # force call of check_object_permissions()
+        task = self.get_object() # force call of check_object_permissions()
         response = self._get_rq_response(
             queue=settings.CVAT_QUEUES.IMPORT_DATA.value,
-            job_id=RQIdManager.build('create', 'task', pk)
+            job_id=RQId(RequestAction.CREATE, RequestTarget.TASK, task.id).render()
         )
         serializer = RqStatusSerializer(data=response)
 
@@ -1562,6 +1640,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     def metadata(self, request, pk):
         self.get_object() #force to call check_object_permissions
         db_task = models.Task.objects.prefetch_related(
+            'segment_set',
             Prefetch('data', queryset=models.Data.objects.select_related('video').prefetch_related(
                 Prefetch('images', queryset=models.Image.objects.prefetch_related('related_files').order_by('frame'))
             ))
@@ -1569,8 +1648,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
 
         if request.method == 'PATCH':
             serializer = DataMetaWriteSerializer(instance=db_task.data, data=request.data)
-            if serializer.is_valid(raise_exception=True):
-                db_task.data = serializer.save()
+            serializer.is_valid(raise_exception=True)
+            db_task.data = serializer.save()
 
         if hasattr(db_task.data, 'video'):
             media = [db_task.data.video]
@@ -1586,6 +1665,7 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
 
         db_data = db_task.data
         db_data.frames = frame_meta
+        db_data.chunks_updated_date = db_task.get_chunks_updated_date()
 
         serializer = DataMetaReadSerializer(db_data)
         return Response(serializer.data)
@@ -1654,15 +1734,65 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         if not self._object.data:
             return HttpResponseNotFound('Task image preview not found')
 
-        data_getter = DataChunkGetter(
+        data_getter = _TaskDataGetter(
+            db_task=self._object,
             data_type='preview',
             data_quality='compressed',
-            data_num=self._object.data.start_frame,
-            task_dim=self._object.dimension
         )
+        return data_getter()
 
-        return data_getter(request, self._object.data.start_frame,
-            self._object.data.stop_frame, self._object.data)
+    @extend_schema(
+        methods=["GET"],
+        summary="Allows getting current validation configuration",
+        responses={
+            '200': OpenApiResponse(TaskValidationLayoutReadSerializer),
+        })
+    @extend_schema(
+        methods=["PATCH"],
+        summary="Allows updating current validation configuration",
+        request=TaskValidationLayoutWriteSerializer,
+        responses={
+            '200': OpenApiResponse(TaskValidationLayoutReadSerializer),
+        },
+        examples=[
+            OpenApiExample("set honeypots to random validation frames", {
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_UNIFORM
+            }),
+            OpenApiExample("set honeypots manually", {
+                "frame_selection_method": models.JobFrameSelectionMethod.MANUAL,
+                "honeypot_real_frames": [10, 20, 22]
+            }),
+            OpenApiExample("disable validation frames", {
+                "disabled_frames": [4, 5, 8]
+            }),
+            OpenApiExample("restore all validation frames", {
+                "disabled_frames": []
+            }),
+        ])
+    @action(detail=True, methods=["GET", "PATCH"], url_path='validation_layout')
+    @transaction.atomic
+    def validation_layout(self, request, pk):
+        db_task = self.get_object() # call check_object_permissions as well
+
+        validation_layout = getattr(db_task.data, 'validation_layout', None)
+
+        if request.method == "PATCH":
+            if not validation_layout:
+                return ValidationError(
+                    "Task has no validation setup configured. "
+                    "Validation must be initialized during task creation"
+                )
+
+            request_serializer = TaskValidationLayoutWriteSerializer(db_task, data=request.data)
+            request_serializer.is_valid(raise_exception=True)
+            validation_layout = request_serializer.save().data.validation_layout
+
+        if not validation_layout:
+            response_serializer = TaskValidationLayoutReadSerializer(SimpleNamespace(mode=None))
+            return Response(response_serializer.data, status=status.HTTP_200_OK)
+
+        response_serializer = TaskValidationLayoutReadSerializer(validation_layout)
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
 
 @extend_schema(tags=['jobs'])
@@ -1672,7 +1802,43 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
         request=JobWriteSerializer,
         responses={
             '201': JobReadSerializer, # check JobWriteSerializer.to_representation
-        }),
+        },
+        examples=[
+            OpenApiExample("create gt job with random 10 frames", {
+                "type": models.JobType.GROUND_TRUTH,
+                "task_id": 42,
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_UNIFORM,
+                "frame_count": 10,
+                "random_seed": 1,
+            }),
+            OpenApiExample("create gt job with random 15% frames", {
+                "type": models.JobType.GROUND_TRUTH,
+                "task_id": 42,
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_UNIFORM,
+                "frame_share": 0.15,
+                "random_seed": 1,
+            }),
+            OpenApiExample("create gt job with 3 random frames in each job", {
+                "type": models.JobType.GROUND_TRUTH,
+                "task_id": 42,
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_PER_JOB,
+                "frames_per_job_count": 3,
+                "random_seed": 1,
+            }),
+            OpenApiExample("create gt job with 20% random frames in each job", {
+                "type": models.JobType.GROUND_TRUTH,
+                "task_id": 42,
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_PER_JOB,
+                "frames_per_job_share": 0.2,
+                "random_seed": 1,
+            }),
+            OpenApiExample("create gt job with manual frame selection", {
+                "type": models.JobType.GROUND_TRUTH,
+                "task_id": 42,
+                "frame_selection_method": models.JobFrameSelectionMethod.MANUAL,
+                "frames": [1, 5, 10, 18],
+            }),
+        ]),
     retrieve=extend_schema(
         summary='Get job details',
         responses={
@@ -1708,7 +1874,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
     queryset = Job.objects.select_related('assignee', 'segment__task__data',
         'segment__task__project', 'segment__task__annotation_guide', 'segment__task__project__annotation_guide',
     ).annotate(
-        Count('issues', distinct=True),
+        django_models.Count('issues', distinct=True),
     ).all()
 
     iam_organization_field = 'segment__task__organization'
@@ -1727,8 +1893,8 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
         'project_name': 'segment__task__project__name',
         'assignee': 'assignee__username'
     }
-    IMPORT_RQ_ID_TEMPLATE = RQIdManager.build(
-        'import', 'job', {}, subresource='annotations'
+    IMPORT_RQ_ID_FACTORY = functools.partial(RQId,
+        RequestAction.IMPORT, RequestTarget.JOB, subresource=RequestSubresource.ANNOTATIONS
     )
 
     def get_queryset(self):
@@ -1753,11 +1919,25 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
         # Required for the extra summary information added in the queryset
         serializer.instance = self.get_queryset().get(pk=serializer.instance.pk)
 
+    @transaction.atomic
     def perform_destroy(self, instance):
         if instance.type != JobType.GROUND_TRUTH:
             raise ValidationError("Only ground truth jobs can be removed")
 
-        return super().perform_destroy(instance)
+        validation_layout: Optional[models.ValidationLayout] = getattr(
+            instance.segment.task.data, 'validation_layout', None
+        )
+        if (validation_layout and validation_layout.mode == models.ValidationMode.GT_POOL):
+            raise ValidationError(
+                'GT jobs cannot be removed when task validation mode is "{}"'.format(
+                    models.ValidationMode.GT_POOL
+                )
+            )
+
+        super().perform_destroy(instance)
+
+        if validation_layout:
+            validation_layout.delete()
 
     # UploadMixin method
     def get_upload_dir(self):
@@ -1775,7 +1955,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
                 return _import_annotations(
                         request=request,
                         filename=annotation_file,
-                        rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                        rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
                         rq_func=dm.task.import_job_annotations,
                         db_obj=self._object,
                         format_name=format_name,
@@ -1926,7 +2106,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
                 db_obj=self._object,
                 import_func=_import_annotations,
                 rq_func=dm.task.import_job_annotations,
-                rq_id_template=self.IMPORT_RQ_ID_TEMPLATE
+                rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
             )
 
         elif request.method == 'PUT':
@@ -1938,7 +2118,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
                 )
                 return _import_annotations(
                     request=request,
-                    rq_id_template=self.IMPORT_RQ_ID_TEMPLATE,
+                    rq_id_factory=self.IMPORT_RQ_ID_FACTORY,
                     rq_func=dm.task.import_job_annotations,
                     db_obj=self._object,
                     format_name=format_name,
@@ -2029,8 +2209,14 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             OpenApiParameter('quality', location=OpenApiParameter.QUERY, required=False,
                 type=OpenApiTypes.STR, enum=['compressed', 'original'],
                 description="Specifies the quality level of the requested data"),
-            OpenApiParameter('number', location=OpenApiParameter.QUERY, required=False, type=OpenApiTypes.INT,
-                description="A unique number value identifying chunk or frame"),
+            OpenApiParameter('number',
+                location=OpenApiParameter.QUERY, required=False, type=OpenApiTypes.INT,
+                description="A unique number value identifying chunk or frame. "
+                    "The numbers are the same as for the task. "
+                    "Deprecated for chunks in favor of 'index'"),
+            OpenApiParameter('index',
+                location=OpenApiParameter.QUERY, required=False, type=OpenApiTypes.INT,
+                description="A unique number value identifying chunk, starts from 0 for each job"),
             ],
         responses={
             '200': OpenApiResponse(OpenApiTypes.BINARY, description='Data of a specific type'),
@@ -2042,12 +2228,15 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
         db_job = self.get_object() # call check_object_permissions as well
         data_type = request.query_params.get('type', None)
         data_num = request.query_params.get('number', None)
+        data_index = request.query_params.get('index', None)
         data_quality = request.query_params.get('quality', 'compressed')
 
-        data_getter = JobDataGetter(db_job, data_type, data_num, data_quality)
-
-        return data_getter(request, db_job.segment.start_frame,
-            db_job.segment.stop_frame, db_job.segment.task.data)
+        data_getter = _JobDataGetter(
+            db_job,
+            data_type=data_type, data_quality=data_quality,
+            data_index=data_index, data_num=data_num
+        )
+        return data_getter()
 
 
     @extend_schema(methods=['GET'], summary='Get metainformation for media files in a job',
@@ -2055,70 +2244,81 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             '200': DataMetaReadSerializer,
         })
     @extend_schema(methods=['PATCH'], summary='Update metainformation for media files in a job',
-        request=DataMetaWriteSerializer,
+        request=JobDataMetaWriteSerializer,
         responses={
             '200': DataMetaReadSerializer,
-        }, tags=['tasks'], versions=['2.0'])
+        }, versions=['2.0'])
     @action(detail=True, methods=['GET', 'PATCH'], serializer_class=DataMetaReadSerializer,
         url_path='data/meta')
     def metadata(self, request, pk):
         self.get_object() # force call of check_object_permissions()
-        db_job = models.Job.objects.prefetch_related(
+
+        db_job = models.Job.objects.select_related(
             'segment',
             'segment__task',
-            Prefetch('segment__task__data', queryset=models.Data.objects.select_related('video').prefetch_related(
-                Prefetch('images', queryset=models.Image.objects.prefetch_related('related_files').order_by('frame'))
-            ))
+        ).prefetch_related(
+            Prefetch(
+                'segment__task__data',
+                queryset=models.Data.objects.select_related(
+                    'video',
+                    'validation_layout',
+                ).prefetch_related(
+                    Prefetch(
+                        'images',
+                        queryset=(
+                            models.Image.objects
+                            .prefetch_related('related_files')
+                            .order_by('frame')
+                        )
+                    )
+                )
+            )
         ).get(pk=pk)
 
-        db_data = db_job.segment.task.data
-        start_frame = db_job.segment.start_frame
-        stop_frame = db_job.segment.stop_frame
+        if request.method == 'PATCH':
+            serializer = JobDataMetaWriteSerializer(instance=db_job, data=request.data)
+            serializer.is_valid(raise_exception=True)
+            db_job = serializer.save()
+
+        db_segment = db_job.segment
+        db_task = db_segment.task
+        db_data = db_task.data
+        start_frame = db_segment.start_frame
+        stop_frame = db_segment.stop_frame
         frame_step = db_data.get_frame_step()
         data_start_frame = db_data.start_frame + start_frame * frame_step
         data_stop_frame = min(db_data.stop_frame, db_data.start_frame + stop_frame * frame_step)
-        frame_set = db_job.segment.frame_set
-
-        if request.method == 'PATCH':
-            serializer = DataMetaWriteSerializer(instance=db_data, data=request.data)
-            if serializer.is_valid(raise_exception=True):
-                serializer.validated_data['deleted_frames'] = list(filter(
-                    lambda frame: frame >= start_frame and frame <= stop_frame,
-                    serializer.validated_data['deleted_frames']
-                )) + list(filter(
-                    lambda frame: frame < start_frame or frame > stop_frame,
-                    db_data.deleted_frames,
-                ))
-                db_data = serializer.save()
-                db_job.segment.task.touch()
-                if db_job.segment.task.project:
-                    db_job.segment.task.project.touch()
+        segment_frame_set = db_segment.frame_set
 
         if hasattr(db_data, 'video'):
             media = [db_data.video]
         else:
             media = [
                 # Insert placeholders if frames are skipped
-                # We could skip them here too, but UI can't decode chunks then
-                f if f.frame in frame_set else SimpleNamespace(
+                # TODO: remove placeholders, UI supports chunks without placeholders already
+                # after https://github.com/cvat-ai/cvat/pull/8272
+                f if f.frame in segment_frame_set else SimpleNamespace(
                     path=f'placeholder.jpg', width=f.width, height=f.height
                 )
-                for f in db_data.images.filter(
-                    frame__gte=data_start_frame,
-                    frame__lte=data_stop_frame,
-                ).all()
+                for f in db_data.images.all()
+                if f.frame in range(data_start_frame, data_stop_frame + frame_step, frame_step)
             ]
 
+        deleted_frames = set(db_data.deleted_frames)
+        if db_job.type == models.JobType.GROUND_TRUTH:
+            deleted_frames.update(db_data.validation_layout.disabled_frames)
+
         # Filter data with segment size
-        # Should data.size also be cropped by segment size?
-        db_data.deleted_frames = filter(
+        db_data.deleted_frames = sorted(filter(
             lambda frame: frame >= start_frame and frame <= stop_frame,
-            db_data.deleted_frames,
-        )
+            deleted_frames,
+        ))
+
         db_data.start_frame = data_start_frame
         db_data.stop_frame = data_stop_frame
-        db_data.size = len(frame_set)
-        db_data.included_frames = db_job.segment.frames or None
+        db_data.size = len(segment_frame_set)
+        db_data.included_frames = db_segment.frames or None
+        db_data.chunks_updated_date = db_segment.chunks_updated_date
 
         frame_meta = [{
             'width': item.width,
@@ -2140,16 +2340,61 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
     def preview(self, request, pk):
         self._object = self.get_object() # call check_object_permissions as well
 
-        data_getter = DataChunkGetter(
+        data_getter = _JobDataGetter(
+            db_job=self._object,
             data_type='preview',
             data_quality='compressed',
-            data_num=self._object.segment.start_frame,
-            task_dim=self._object.segment.task.dimension
         )
+        return data_getter()
 
-        return data_getter(request, self._object.segment.start_frame,
-           self._object.segment.stop_frame, self._object.segment.task.data)
+    @extend_schema(
+        methods=["GET"],
+        summary="Allows getting current validation configuration",
+        responses={
+            '200': OpenApiResponse(JobValidationLayoutReadSerializer),
+        })
+    @extend_schema(
+        methods=["PATCH"],
+        summary="Allows updating current validation configuration",
+        request=JobValidationLayoutWriteSerializer,
+        responses={
+            '200': OpenApiResponse(JobValidationLayoutReadSerializer),
+        },
+        examples=[
+            OpenApiExample("set honeypots to random validation frames", {
+                "frame_selection_method": models.JobFrameSelectionMethod.RANDOM_UNIFORM
+            }),
+            OpenApiExample("set honeypots manually", {
+                "frame_selection_method": models.JobFrameSelectionMethod.MANUAL,
+                "honeypot_real_frames": [10, 20, 22]
+            }),
+        ])
+    @action(detail=True, methods=["GET", "PATCH"], url_path='validation_layout')
+    @transaction.atomic
+    def validation_layout(self, request, pk):
+        self.get_object() # call check_object_permissions as well
 
+        db_job = models.Job.objects.prefetch_related(
+            'segment',
+            'segment__task',
+            Prefetch('segment__task__data',
+                queryset=(
+                    models.Data.objects
+                    .select_related('video', 'validation_layout')
+                    .prefetch_related(
+                        Prefetch('images', queryset=models.Image.objects.order_by('frame'))
+                    )
+                )
+            )
+        ).get(pk=pk)
+
+        if request.method == "PATCH":
+            request_serializer = JobValidationLayoutWriteSerializer(db_job, data=request.data)
+            request_serializer.is_valid(raise_exception=True)
+            db_job = request_serializer.save()
+
+        response_serializer = JobValidationLayoutReadSerializer(db_job)
+        return Response(response_serializer.data, status=status.HTTP_200_OK)
 
 @extend_schema(tags=['issues'])
 @extend_schema_view(
@@ -2719,13 +2964,13 @@ class CloudStorageViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             # The idea is try to define real manifest preview only for the storages that have related manifests
             # because otherwise it can lead to extra calls to a bucket, that are usually not free.
             if not db_storage.has_at_least_one_manifest:
-                result = cache.get_cloud_preview_with_mime(db_storage)
+                result = cache.get_cloud_preview(db_storage)
                 if not result:
                     return HttpResponseNotFound('Cloud storage preview not found')
-                return HttpResponse(result[0], result[1])
+                return HttpResponse(result[0].getvalue(), result[1])
 
-            preview, mime = cache.get_or_set_cloud_preview_with_mime(db_storage)
-            return HttpResponse(preview, mime)
+            preview, mime = cache.get_or_set_cloud_preview(db_storage)
+            return HttpResponse(preview.getvalue(), mime)
         except CloudStorageModel.DoesNotExist:
             message = f"Storage {pk} does not exist"
             slogger.glob.error(message)
@@ -2735,6 +2980,11 @@ class CloudStorageViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
                 '\n'.join([str(d) for d in ex.detail])
             slogger.cloud_storage[pk].info(msg)
             return Response(data=msg, status=ex.status_code)
+        except (TimeoutError, CvatChunkTimestampMismatchError, LockError):
+            return Response(
+                status=status.HTTP_429_TOO_MANY_REQUESTS,
+                headers={'Retry-After': _RETRY_AFTER_TIMEOUT},
+            )
         except Exception as ex:
             slogger.glob.error(str(ex))
             return Response("An internal error has occurred",
@@ -3021,11 +3271,14 @@ class AnnotationGuidesViewSet(
 def rq_exception_handler(rq_job, exc_type, exc_value, tb):
     rq_job.meta[RQJobMetaField.FORMATTED_EXCEPTION] = "".join(
         traceback.format_exception_only(exc_type, exc_value))
+    if rq_job.origin == settings.CVAT_QUEUES.CHUNKS.value:
+        rq_job.meta[RQJobMetaField.EXCEPTION_TYPE] = exc_type
+        rq_job.meta[RQJobMetaField.EXCEPTION_ARGS] = exc_value.args
     rq_job.save_meta()
 
     return True
 
-def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
+def _import_annotations(request, rq_id_factory, rq_func, db_obj, format_name,
                         filename=None, location_conf=None, conv_mask_to_poly=True):
 
     format_desc = {f.DISPLAY_NAME: f
@@ -3039,7 +3292,7 @@ def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
     rq_id = request.query_params.get('rq_id')
     rq_id_should_be_checked = bool(rq_id)
     if not rq_id:
-        rq_id = rq_id_template.format(db_obj.pk)
+        rq_id = rq_id_factory(db_obj.pk).render()
 
     queue = django_rq.get_queue(settings.CVAT_QUEUES.IMPORT_DATA.value)
     rq_job = queue.fetch_job(rq_id)
@@ -3141,7 +3394,10 @@ def _import_annotations(request, rq_id_template, rq_func, db_obj, format_name,
 
     return Response(status=status.HTTP_202_ACCEPTED)
 
-def _import_project_dataset(request, rq_id_template, rq_func, db_obj, format_name, filename=None, conv_mask_to_poly=True, location_conf=None):
+def _import_project_dataset(
+    request, rq_id_factory, rq_func, db_obj, format_name,
+    filename=None, conv_mask_to_poly=True, location_conf=None
+):
     format_desc = {f.DISPLAY_NAME: f
         for f in dm.views.get_import_formats()}.get(format_name)
     if format_desc is None:
@@ -3150,7 +3406,7 @@ def _import_project_dataset(request, rq_id_template, rq_func, db_obj, format_nam
     elif not format_desc.ENABLED:
         return Response(status=status.HTTP_405_METHOD_NOT_ALLOWED)
 
-    rq_id = rq_id_template.format(db_obj.pk)
+    rq_id = rq_id_factory(db_obj.pk).render()
 
     queue = django_rq.get_queue(settings.CVAT_QUEUES.IMPORT_DATA.value)
     rq_job = queue.fetch_job(rq_id)
@@ -3271,6 +3527,7 @@ class RequestViewSet(viewsets.GenericViewSet):
         'job_id',
         # derivatives fields (from parsed rq_id)
         'action',
+        'target',
         'subresource',
         'format',
     ]
@@ -3280,7 +3537,9 @@ class RequestViewSet(viewsets.GenericViewSet):
     lookup_fields = {
         'created_date': 'created_at',
         'action': 'parsed_rq_id.action',
+        'target': 'parsed_rq_id.target',
         'subresource': 'parsed_rq_id.subresource',
+        'format': 'parsed_rq_id.format',
         'status': 'get_status',
         'project_id': 'meta.project_id',
         'task_id': 'meta.task_id',
@@ -3296,6 +3555,7 @@ class RequestViewSet(viewsets.GenericViewSet):
         'task_id': SchemaField('integer'),
         'job_id': SchemaField('integer'),
         'action': SchemaField('string', RequestAction.choices),
+        'target': SchemaField('string', RequestTarget.choices),
         'subresource': SchemaField('string', RequestSubresource.choices),
         'format': SchemaField('string'),
         'org': SchemaField('string'),
@@ -3319,7 +3579,7 @@ class RequestViewSet(viewsets.GenericViewSet):
         for job in queue.job_class.fetch_many(job_ids, queue.connection):
             if job and is_rq_job_owner(job, user_id):
                 try:
-                    parsed_rq_id = RQIdManager.parse(job.id)
+                    parsed_rq_id = RQId.parse(job.id)
                 except Exception: # nosec B112
                     continue
                 job.parsed_rq_id = parsed_rq_id
@@ -3356,7 +3616,7 @@ class RequestViewSet(viewsets.GenericViewSet):
             Optional[RQJob]: The retrieved RQJob, or None if not found.
         """
         try:
-            parsed_rq_id = RQIdManager.parse(rq_id)
+            parsed_rq_id = RQId.parse(rq_id)
         except Exception:
             return None
 
@@ -3387,7 +3647,7 @@ class RequestViewSet(viewsets.GenericViewSet):
         job = self._get_rq_job_by_id(pk)
 
         if not job:
-            return HttpResponseNotFound(f"There is no request with specified id: {pk}")
+            return HttpResponseNotFound("There is no request with specified id")
 
         self.check_object_permissions(request, job)
 
@@ -3424,7 +3684,7 @@ class RequestViewSet(viewsets.GenericViewSet):
         rq_job = self._get_rq_job_by_id(pk)
 
         if not rq_job:
-            return HttpResponseNotFound(f"There is no request with specified id: {pk!r}")
+            return HttpResponseNotFound("There is no request with specified id")
 
         self.check_object_permissions(request, rq_job)
 

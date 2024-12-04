@@ -11,7 +11,7 @@ import importlib
 import sys
 import traceback
 from contextlib import suppress, nullcontext
-from typing import Any, Dict, Optional, Callable, Union, Iterable
+from typing import Any, Dict, Optional, Callable, Sequence, Union
 import subprocess
 import os
 import urllib.parse
@@ -96,6 +96,9 @@ def execute_python_code(source_code, global_vars=None, local_vars=None):
         _, _, tb = sys.exc_info()
         line_number = traceback.extract_tb(tb)[-1][1]
         raise InterpreterError("{} at line {}: {}".format(error_class, line_number, details))
+
+class CvatChunkTimestampMismatchError(Exception):
+    pass
 
 def av_scan_paths(*paths):
     if 'yes' == os.environ.get('CLAM_AV'):
@@ -198,10 +201,22 @@ def define_dependent_job(
     return Dependency(jobs=[sorted(user_jobs, key=lambda job: job.created_at)[-1]], allow_failure=True) if user_jobs else None
 
 
-def get_rq_lock_by_user(queue: DjangoRQ, user_id: int) -> Union[Lock, nullcontext]:
+def get_rq_lock_by_user(queue: DjangoRQ, user_id: int, *, timeout: Optional[int] = 30, blocking_timeout: Optional[int] = None) -> Union[Lock, nullcontext]:
     if settings.ONE_RUNNING_JOB_IN_QUEUE_PER_USER:
-        return queue.connection.lock(f'{queue.name}-lock-{user_id}', timeout=30)
+        return queue.connection.lock(
+            name=f'{queue.name}-lock-{user_id}',
+            timeout=timeout,
+            blocking_timeout=blocking_timeout,
+        )
     return nullcontext()
+
+def get_rq_lock_for_job(queue: DjangoRQ, rq_id: str, *, timeout: Optional[int] = 60, blocking_timeout: Optional[int] = None) -> Lock:
+    # lock timeout corresponds to the nginx request timeout (proxy_read_timeout)
+    return queue.connection.lock(
+        name=f'lock-for-job-{rq_id}'.lower(),
+        timeout=timeout,
+        blocking_timeout=blocking_timeout,
+    )
 
 def get_rq_job_meta(
     request: HttpRequest,
@@ -359,13 +374,10 @@ def sendfile(
 
     return _sendfile(request, filename, attachment, attachment_filename, mimetype, encoding)
 
-def preload_image(image: tuple[str, str, str])-> tuple[Image.Image, str, str]:
+def load_image(image: tuple[str, str, str])-> tuple[Image.Image, str, str]:
     pil_img = Image.open(image[0])
     pil_img.load()
     return pil_img, image[1], image[2]
-
-def preload_images(images: Iterable[tuple[str, str, str]]) -> list[tuple[Image.Image, str, str]]:
-    return list(map(preload_image, images))
 
 def build_backup_file_name(
     *,
@@ -413,6 +425,25 @@ def directory_tree(path, max_depth=None) -> str:
 def is_dataset_export(request: HttpRequest) -> bool:
     return to_bool(request.query_params.get('save_images', False))
 
+
 def chunked_list(lst, chunk_size):
     for i in range(0, len(lst), chunk_size):
         yield lst[i:i + chunk_size]
+
+
+FORMATTED_LIST_DISPLAY_THRESHOLD = 10
+"""
+Controls maximum rendered list items. The remainder is appended as ' (and X more)'.
+"""
+
+def format_list(
+    items: Sequence[str], *, max_items: Optional[int] = None, separator: str = ", "
+) -> str:
+    if max_items is None:
+        max_items = FORMATTED_LIST_DISPLAY_THRESHOLD
+
+    remainder_count = len(items) - max_items
+    return "{}{}".format(
+        separator.join(items[:max_items]),
+        f" (and {remainder_count} more)" if 0 < remainder_count else "",
+    )
