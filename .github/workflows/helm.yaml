@@ -1,5 +1,5 @@
 ---
-name: Helm
+name: Helm Publish
 
 on:
   push:
