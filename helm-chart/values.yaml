@@ -141,7 +141,9 @@ cvat:
         annotations: {}
         resources: {}
         affinity: {}
+        nodeSelector: {}
         tolerations: []
+        topologySpreadConstraints: []
         additionalEnv: []
         additionalVolumes: []
         additionalVolumeMounts: []
