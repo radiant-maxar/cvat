@@ -13,22 +13,11 @@ import tempfile
 import time
 import zipfile
 import zlib
+from collections.abc import Collection, Generator, Iterator, Sequence
 from contextlib import ExitStack, closing
 from datetime import datetime, timezone
 from itertools import groupby, pairwise
-from typing import (
-    Any,
-    Callable,
-    Collection,
-    Generator,
-    Iterator,
-    Optional,
-    Sequence,
-    Tuple,
-    Type,
-    Union,
-    overload,
-)
+from typing import Any, Callable, Optional, Union, overload
 
 import attrs
 import av
@@ -43,6 +32,7 @@ from django.db import models as django_models
 from django.utils import timezone as django_tz
 from redis.exceptions import LockError
 from rest_framework.exceptions import NotFound, ValidationError
+from rq.job import JobStatus as RQJobStatus
 
 from cvat.apps.engine import models
 from cvat.apps.engine.cloud_provider import (
@@ -61,12 +51,13 @@ from cvat.apps.engine.media_extractors import (
     VideoReaderWithManifest,
     ZipChunkWriter,
     ZipCompressedChunkWriter,
+    load_image,
 )
 from cvat.apps.engine.rq_job_handler import RQJobMetaField
 from cvat.apps.engine.utils import (
     CvatChunkTimestampMismatchError,
+    format_list,
     get_rq_lock_for_job,
-    load_image,
     md5_hash,
 )
 from utils.dataset_manifest import ImageManifestManager
@@ -74,8 +65,8 @@ from utils.dataset_manifest import ImageManifestManager
 slogger = ServerLogManager(__name__)
 
 
-DataWithMime = Tuple[io.BytesIO, str]
-_CacheItem = Tuple[io.BytesIO, str, int, Union[datetime, None]]
+DataWithMime = tuple[io.BytesIO, str]
+_CacheItem = tuple[io.BytesIO, str, int, Union[datetime, None]]
 
 
 def enqueue_create_chunk_job(
@@ -83,15 +74,20 @@ def enqueue_create_chunk_job(
     rq_job_id: str,
     create_callback: Callback,
     *,
-    blocking_timeout: int = 50,
     rq_job_result_ttl: int = 60,
     rq_job_failure_ttl: int = 3600 * 24 * 14,  # 2 weeks
 ) -> rq.job.Job:
     try:
-        with get_rq_lock_for_job(queue, rq_job_id, blocking_timeout=blocking_timeout):
+        with get_rq_lock_for_job(queue, rq_job_id):
             rq_job = queue.fetch_job(rq_job_id)
 
-            if not rq_job:
+            if not rq_job or (
+                # Enqueue the job if the chunk was deleted but the RQ job still exists.
+                # This can happen in cases involving jobs with honeypots and
+                # if the job wasn't collected by the requesting process for any reason.
+                rq_job.get_status(refresh=False)
+                in {RQJobStatus.FINISHED, RQJobStatus.FAILED, RQJobStatus.CANCELED}
+            ):
                 rq_job = queue.enqueue(
                     create_callback,
                     job_id=rq_job_id,
@@ -199,11 +195,13 @@ class MediaCache:
             cache_item_ttl=cache_item_ttl,
         )
 
-    def _get_queue(self) -> rq.Queue:
-        return django_rq.get_queue(self._QUEUE_NAME)
+    @classmethod
+    def _get_queue(cls) -> rq.Queue:
+        return django_rq.get_queue(cls._QUEUE_NAME)
 
-    def _make_queue_job_id(self, key: str) -> str:
-        return f"{self._QUEUE_JOB_PREFIX_TASK}{key}"
+    @classmethod
+    def _make_queue_job_id(cls, key: str) -> str:
+        return f"{cls._QUEUE_JOB_PREFIX_TASK}{key}"
 
     @staticmethod
     def _drop_return_value(func: Callable[..., DataWithMime], *args: Any, **kwargs: Any):
@@ -220,9 +218,19 @@ class MediaCache:
         item_data = create_callback()
         item_data_bytes = item_data[0].getvalue()
         item = (item_data[0], item_data[1], cls._get_checksum(item_data_bytes), timestamp)
-        if item_data_bytes:
-            cache = cls._cache()
-            cache.set(key, item, timeout=cache_item_ttl or cache.default_timeout)
+
+        # allow empty data to be set in cache to prevent
+        # future rq jobs from being enqueued to prepare the item
+        cache = cls._cache()
+        with get_rq_lock_for_job(
+            cls._get_queue(),
+            key,
+        ):
+            cached_item = cache.get(key)
+            if cached_item is not None and timestamp <= cached_item[3]:
+                item = cached_item
+            else:
+                cache.set(key, item, timeout=cache_item_ttl or cache.default_timeout)
 
         return item
 
@@ -233,22 +241,17 @@ class MediaCache:
         *,
         cache_item_ttl: Optional[int] = None,
     ) -> _CacheItem:
-
-        queue = self._get_queue()
-        rq_id = self._make_queue_job_id(key)
-
         slogger.glob.info(f"Starting to prepare chunk: key {key}")
         if _is_run_inside_rq():
-            with get_rq_lock_for_job(queue, rq_id, timeout=None, blocking_timeout=None):
-                item = self._create_and_set_cache_item(
-                    key,
-                    create_callback,
-                    cache_item_ttl=cache_item_ttl,
-                )
+            item = self._create_and_set_cache_item(
+                key,
+                create_callback,
+                cache_item_ttl=cache_item_ttl,
+            )
         else:
             rq_job = enqueue_create_chunk_job(
-                queue=queue,
-                rq_job_id=rq_id,
+                queue=self._get_queue(),
+                rq_job_id=self._make_queue_job_id(key),
                 create_callback=Callback(
                     callable=self._drop_return_value,
                     args=[
@@ -269,11 +272,12 @@ class MediaCache:
         return item
 
     def _delete_cache_item(self, key: str):
-        try:
-            self._cache().delete(key)
-            slogger.glob.info(f"Removed chunk from the cache: key {key}")
-        except pickle.UnpicklingError:
-            slogger.glob.error(f"Failed to remove item from the cache: key {key}", exc_info=True)
+        self._cache().delete(key)
+        slogger.glob.info(f"Removed the cache key {key}")
+
+    def _bulk_delete_cache_items(self, keys: Sequence[str]):
+        self._cache().delete_many(keys)
+        slogger.glob.info(f"Removed the cache keys {format_list(keys)}")
 
     def _get_cache_item(self, key: str) -> Optional[_CacheItem]:
         try:
@@ -344,18 +348,25 @@ class MediaCache:
     ) -> str:
         return f"{self._make_cache_key_prefix(db_obj)}_task_chunk_{chunk_number}_{quality}"
 
-    def _make_context_image_preview_key(self, db_data: models.Data, frame_number: int) -> str:
-        return f"context_image_{db_data.id}_{frame_number}_preview"
+    def _make_frame_context_images_chunk_key(self, db_data: models.Data, frame_number: int) -> str:
+        return f"context_images_{db_data.id}_{frame_number}"
 
     @overload
     def _to_data_with_mime(self, cache_item: _CacheItem) -> DataWithMime: ...
 
     @overload
-    def _to_data_with_mime(self, cache_item: Optional[_CacheItem]) -> Optional[DataWithMime]: ...
+    def _to_data_with_mime(
+        self, cache_item: Optional[_CacheItem], *, allow_none: bool = False
+    ) -> Optional[DataWithMime]: ...
 
-    def _to_data_with_mime(self, cache_item: Optional[_CacheItem]) -> Optional[DataWithMime]:
+    def _to_data_with_mime(
+        self, cache_item: Optional[_CacheItem], *, allow_none: bool = False
+    ) -> Optional[DataWithMime]:
         if not cache_item:
-            return None
+            if allow_none:
+                return None
+
+            raise ValueError("A cache item is not allowed to be None")
 
         return cache_item[:2]
 
@@ -383,7 +394,8 @@ class MediaCache:
         return self._to_data_with_mime(
             self._get_cache_item(
                 key=self._make_chunk_key(db_task, chunk_number, quality=quality),
-            )
+            ),
+            allow_none=True,
         )
 
     def get_or_set_task_chunk(
@@ -411,7 +423,8 @@ class MediaCache:
         return self._to_data_with_mime(
             self._get_cache_item(
                 key=self._make_segment_task_chunk_key(db_segment, chunk_number, quality=quality),
-            )
+            ),
+            allow_none=True,
         )
 
     def get_or_set_segment_task_chunk(
@@ -468,8 +481,49 @@ class MediaCache:
             self._make_chunk_key(db_segment, chunk_number=chunk_number, quality=quality)
         )
 
+    def remove_context_images_chunk(self, db_data: models.Data, frame_number: str) -> None:
+        self._delete_cache_item(
+            self._make_frame_context_images_chunk_key(db_data, frame_number=frame_number)
+        )
+
+    def remove_segments_chunks(self, params: Sequence[dict[str, Any]]) -> None:
+        """
+        Removes several segment chunks from the cache.
+
+        The function expects a sequence of remove_segment_chunk() parameters as dicts.
+        """
+        # TODO: add a version of this function
+        # that removes related cache elements as well (context images, previews, ...)
+        # to provide encapsulation
+
+        # TODO: add a generic bulk cleanup function for different objects, including related ones
+        # (likely a bulk key aggregator should be used inside to reduce requests count)
+
+        keys_to_remove = []
+        for item_params in params:
+            db_obj = item_params.pop("db_segment")
+            keys_to_remove.append(self._make_chunk_key(db_obj, **item_params))
+
+        self._bulk_delete_cache_items(keys_to_remove)
+
+    def remove_context_images_chunks(self, params: Sequence[dict[str, Any]]) -> None:
+        """
+        Removes several context image chunks from the cache.
+
+        The function expects a sequence of remove_context_images_chunk() parameters as dicts.
+        """
+
+        keys_to_remove = []
+        for item_params in params:
+            db_obj = item_params.pop("db_data")
+            keys_to_remove.append(self._make_frame_context_images_chunk_key(db_obj, **item_params))
+
+        self._bulk_delete_cache_items(keys_to_remove)
+
     def get_cloud_preview(self, db_storage: models.CloudStorage) -> Optional[DataWithMime]:
-        return self._to_data_with_mime(self._get_cache_item(self._make_preview_key(db_storage)))
+        return self._to_data_with_mime(
+            self._get_cache_item(self._make_preview_key(db_storage)), allow_none=True
+        )
 
     def get_or_set_cloud_preview(self, db_storage: models.CloudStorage) -> DataWithMime:
         return self._to_data_with_mime(
@@ -488,7 +542,7 @@ class MediaCache:
     ) -> DataWithMime:
         return self._to_data_with_mime(
             self._get_or_set_cache_item(
-                self._make_context_image_preview_key(db_data, frame_number),
+                self._make_frame_context_images_chunk_key(db_data, frame_number),
                 Callback(
                     callable=self.prepare_context_images_chunk,
                     args=[db_data, frame_number],
@@ -584,7 +638,7 @@ class MediaCache:
     @staticmethod
     def _read_raw_frames(
         db_task: Union[models.Task, int], frame_ids: Sequence[int]
-    ) -> Generator[Tuple[Union[av.VideoFrame, PIL.Image.Image], str, str], None, None]:
+    ) -> Generator[tuple[Union[av.VideoFrame, PIL.Image.Image], str, str], None, None]:
         if isinstance(db_task, int):
             db_task = models.Task.objects.get(pk=db_task)
 
@@ -910,7 +964,7 @@ def prepare_preview_image(image: PIL.Image.Image) -> DataWithMime:
 
 
 def prepare_chunk(
-    task_chunk_frames: Iterator[Tuple[Any, str, int]],
+    task_chunk_frames: Iterator[tuple[Any, str, int]],
     *,
     quality: FrameQuality,
     db_task: models.Task,
@@ -920,7 +974,7 @@ def prepare_chunk(
 
     db_data = db_task.data
 
-    writer_classes: dict[FrameQuality, Type[IChunkWriter]] = {
+    writer_classes: dict[FrameQuality, type[IChunkWriter]] = {
         FrameQuality.COMPRESSED: (
             Mpeg4CompressedChunkWriter
             if db_data.compressed_chunk_type == models.DataChoice.VIDEO
@@ -953,7 +1007,7 @@ def prepare_chunk(
     return buffer, get_chunk_mime_type_for_writer(writer_class)
 
 
-def get_chunk_mime_type_for_writer(writer: Union[IChunkWriter, Type[IChunkWriter]]) -> str:
+def get_chunk_mime_type_for_writer(writer: Union[IChunkWriter, type[IChunkWriter]]) -> str:
     if isinstance(writer, IChunkWriter):
         writer_class = type(writer)
     else:
