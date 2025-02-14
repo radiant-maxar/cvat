@@ -1,5 +1,5 @@
 // Copyright (C) 2019-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -35,6 +35,7 @@ import {
     QualitySettingsFilter, SerializedAsset,
 } from './server-response-types';
 import QualityReport from './quality-report';
+import AboutData from './about';
 import QualityConflict, { ConflictSeverity } from './quality-conflict';
 import QualitySettings from './quality-settings';
 import { getFramesMeta } from './frames';
@@ -72,7 +73,7 @@ export default function implementAPI(cvat: CVATCore): CVATCore {
 
     implementationMixin(cvat.server.about, async () => {
         const result = await serverProxy.server.about();
-        return result;
+        return new AboutData(result);
     });
     implementationMixin(cvat.server.share, async (directory: string, searchPrefix?: string) => {
         const result = await serverProxy.server.share(directory, searchPrefix);

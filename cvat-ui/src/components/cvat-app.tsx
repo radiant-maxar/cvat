@@ -1,5 +1,5 @@
 // Copyright (C) 2020-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -325,6 +325,11 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
             loadServerAPISchema();
         }
 
+        if (!aboutInitialized && !aboutFetching) {
+            loadAbout();
+            return;
+        }
+
         if (user == null || !user.isVerified || !user.id) {
             return;
         }
@@ -335,10 +340,6 @@ class CVATApplication extends React.PureComponent<CVATAppProps & RouteComponentP
 
         if (!formatsInitialized && !formatsFetching) {
             loadFormats();
-        }
-
-        if (!aboutInitialized && !aboutFetching) {
-            loadAbout();
         }
 
         if (organizationInitialized && !requestsInitialized && !requestsFetching) {

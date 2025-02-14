@@ -1,5 +1,5 @@
 # Copyright (C) 2018-2022 Intel Corporation
-# Copyright (C) 2022-2024 CVAT.ai Corporation
+# Copyright (C) CVAT.ai Corporation
 #
 # SPDX-License-Identifier: MIT
 
@@ -27,6 +27,7 @@ import django_rq
 from attr.converters import to_bool
 from django.conf import settings
 from django.contrib.auth.models import User
+from django.core.files.storage import storages
 from django.db import IntegrityError
 from django.db import models as django_models
 from django.db import transaction
@@ -88,6 +89,7 @@ from cvat.apps.engine.mixins import (
     PartialUpdateModelMixin,
     UploadMixin,
 )
+from cvat.apps.engine.model_utils import bulk_create
 from cvat.apps.engine.models import AnnotationGuide, Asset, ClientFile, CloudProviderChoice
 from cvat.apps.engine.models import CloudStorage as CloudStorageModel
 from cvat.apps.engine.models import (
@@ -211,14 +213,16 @@ class ServerViewSet(viewsets.ViewSet):
         from cvat import __version__ as cvat_version
         about = {
             "name": "Computer Vision Annotation Tool",
-            "version": cvat_version,
+            "subtitle": settings.ABOUT_INFO["subtitle"],
             "description": "CVAT is completely re-designed and re-implemented " +
                 "version of Video Annotation Tool from Irvine, California " +
                 "tool. It is free, online, interactive video and image annotation " +
                 "tool for computer vision. It is being used by our team to " +
                 "annotate million of objects with different properties. Many UI " +
                 "and UX decisions are based on feedbacks from professional data " +
-                "annotation team."
+                "annotation team.",
+            "version": cvat_version,
+            "logo_url": request.build_absolute_uri(storages["staticfiles"].url(settings.LOGO_FILENAME)),
         }
         serializer = AboutSerializer(data=about)
         if serializer.is_valid(raise_exception=True):
@@ -531,7 +535,7 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             return self._object.get_tmp_dirname()
         elif 'backup' in self.action:
             return backup.get_backup_dirname()
-        return ""
+        assert False
 
     def upload_finished(self, request):
         if self.action == 'dataset':
@@ -539,9 +543,10 @@ class ProjectViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
             tmp_dir = self._object.get_tmp_dirname()
-            uploaded_file = None
-            if os.path.isfile(os.path.join(tmp_dir, filename)):
-                uploaded_file = os.path.join(tmp_dir, filename)
+            uploaded_file = os.path.join(tmp_dir, filename)
+            if not os.path.isfile(uploaded_file):
+                uploaded_file = None
+
             return _import_project_dataset(
                 request=request,
                 filename=uploaded_file,
@@ -1132,7 +1137,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             return self._object.data.get_upload_dirname()
         elif 'backup' in self.action:
             return backup.get_backup_dirname()
-        return ""
+
+        assert False
 
     def _prepare_upload_info_entry(self, filename: str) -> str:
         filename = osp.normpath(filename)
@@ -1148,10 +1154,13 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     def _append_upload_info_entries(self, client_files: list[dict[str, Any]]):
         # batch version of _maybe_append_upload_info_entry() without optional insertion
         task_data = cast(Data, self._object.data)
-        task_data.client_files.bulk_create([
-            ClientFile(file=self._prepare_upload_info_entry(cf['file'].name), data=task_data)
-            for cf in client_files
-        ])
+        bulk_create(
+            ClientFile,
+            [
+                ClientFile(file=self._prepare_upload_info_entry(cf['file'].name), data=task_data)
+                for cf in client_files
+            ]
+        )
 
     def _sort_uploaded_files(self, uploaded_files: list[str], ordering: list[str]) -> list[str]:
         """
@@ -1210,8 +1219,8 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
             tmp_dir = self._object.get_tmp_dirname()
-            if os.path.isfile(os.path.join(tmp_dir, filename)):
-                annotation_file = os.path.join(tmp_dir, filename)
+            annotation_file = os.path.join(tmp_dir, filename)
+            if os.path.isfile(annotation_file):
                 return _import_annotations(
                         request=request,
                         filename=annotation_file,
@@ -1819,6 +1828,11 @@ class TaskViewSet(viewsets.GenericViewSet, mixins.ListModelMixin,
     @extend_schema(
         methods=["PATCH"],
         summary="Allows updating current validation configuration",
+        description=textwrap.dedent("""
+            WARNING: this operation is not protected from race conditions.
+            It's up to the user to ensure no parallel calls to this operation happen.
+            It affects image access, including exports with images, backups, chunk downloading etc.
+        """),
         request=TaskValidationLayoutWriteSerializer,
         responses={
             '200': OpenApiResponse(TaskValidationLayoutReadSerializer),
@@ -1949,7 +1963,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
     iam_organization_field = 'segment__task__organization'
     search_fields = ('task_name', 'project_name', 'assignee', 'state', 'stage')
     filter_fields = list(search_fields) + [
-        'id', 'task_id', 'project_id', 'updated_date', 'dimension', 'type'
+        'id', 'task_id', 'project_id', 'updated_date', 'dimension', 'type', 'parent_job_id',
     ]
     simple_filters = list(set(filter_fields) - {'id', 'updated_date'})
     ordering_fields = list(filter_fields)
@@ -2019,8 +2033,8 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
             filename = request.query_params.get("filename", "")
             conv_mask_to_poly = to_bool(request.query_params.get('conv_mask_to_poly', True))
             tmp_dir = self.get_upload_dir()
-            if os.path.isfile(os.path.join(tmp_dir, filename)):
-                annotation_file = os.path.join(tmp_dir, filename)
+            annotation_file = os.path.join(tmp_dir, filename)
+            if os.path.isfile(annotation_file):
                 return _import_annotations(
                         request=request,
                         filename=annotation_file,
@@ -2159,7 +2173,7 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
         serializer_class=LabeledDataSerializer, parser_classes=_UPLOAD_PARSER_CLASSES,
         csrf_workaround_is_needed=csrf_workaround_is_needed_for_export)
     def annotations(self, request, pk):
-        self._object = self.get_object() # force call of check_object_permissions()
+        self._object: models.Job = self.get_object() # force call of check_object_permissions()
         if request.method == 'GET':
             # FUTURE-TODO: mark as deprecated using this endpoint to export annotations when new API for result file downloading will be implemented
             return self.export_dataset_v1(
@@ -2425,6 +2439,11 @@ class JobViewSet(viewsets.GenericViewSet, mixins.ListModelMixin, mixins.CreateMo
     @extend_schema(
         methods=["PATCH"],
         summary="Allows updating current validation configuration",
+        description=textwrap.dedent("""
+            WARNING: this operation is not protected from race conditions.
+            It's up to the user to ensure no parallel calls to this operation happen.
+            It affects image access, including exports with images, backups, chunk downloading etc.
+        """),
         request=JobValidationLayoutWriteSerializer,
         responses={
             '200': OpenApiResponse(JobValidationLayoutReadSerializer),

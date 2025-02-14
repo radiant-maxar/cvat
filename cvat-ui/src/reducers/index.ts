@@ -1,5 +1,5 @@
 // Copyright (C) 2020-2022 Intel Corporation
-// Copyright (C) 2022-2024 CVAT.ai Corporation
+// Copyright (C) CVAT.ai Corporation
 //
 // SPDX-License-Identifier: MIT
 
@@ -9,6 +9,7 @@ import {
     Webhook, MLModel, Organization, Job, Task, Project, Label, User,
     QualityConflict, FramesMetaData, RQStatus, Event, Invitation, SerializedAPISchema,
     Request, JobValidationLayout, QualitySettings, TaskValidationLayout, ObjectState,
+    AboutData,
 } from 'cvat-core-wrapper';
 import { IntelligentScissors } from 'utils/opencv-wrapper/intelligent-scissors';
 import { KeyMap, KeyMapItem } from 'utils/mousetrap-react';
@@ -336,10 +337,8 @@ export interface PluginsState {
 }
 
 export interface AboutState {
-    server: any;
+    server: AboutData;
     packageVersion: {
-        core: string;
-        canvas: string;
         ui: string;
     };
     fetching: boolean;
