@@ -42,12 +42,12 @@ dependencies:
     condition: analytics.enabled
 
   - name: clickhouse
-    version: 7.2.0
+    version: 8.0.1
     repository: https://charts.bitnami.com/bitnami
     condition: clickhouse.enabled
 
   - name: grafana
-    version: 8.8.5
+    version: 8.10.0
     repository: https://grafana.github.io/helm-charts
     condition: analytics.enabled
 
@@ -57,6 +57,6 @@ dependencies:
     condition: traefik.enabled
 
   - name: redis
-    version: 20.6.3
+    version: 20.7.0
     repository: https://charts.bitnami.com/bitnami
     condition: redis.enabled
