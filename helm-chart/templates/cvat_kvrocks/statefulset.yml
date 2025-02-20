@@ -78,6 +78,10 @@ spec:
               - ./bin/redis-cli -p 6666 PING | grep -E '(PONG|NOAUTH)'
             {{- toYaml (omit .Values.cvat.kvrocks.livenessProbe "enabled") | nindent 12 }}
           {{- end }}
+          {{- with .Values.cvat.kvrocks.securityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           volumeMounts:
           - name: {{ .Release.Name }}-kvrocks-data
             mountPath: /var/lib/kvrocks/data
@@ -94,6 +98,10 @@ spec:
       {{- end }}
       {{- with .Values.cvat.kvrocks.nodeSelector }}
       nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.cvat.kvrocks.podSecurityContext }}
+      securityContext:
         {{- toYaml . | nindent 8 }}
       {{- end }}
       {{- with .Values.cvat.kvrocks.tolerations }}

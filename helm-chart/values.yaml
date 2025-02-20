@@ -298,7 +298,7 @@ cvat:
       name: cvat-kvrocks-secret
       password: cvat_kvrocks
     image: apache/kvrocks
-    tag: 2.7.0
+    tag: 2.11.1
     imagePullPolicy: IfNotPresent
     labels: {}
     #  test: test
@@ -307,6 +307,19 @@ cvat:
     resources: {}
     affinity: {}
     nodeSelector: {}
+    podSecurityContext:
+      fsGroup: 999
+      fsGroupChangePolicy: OnRootMismatch
+      runAsNonRoot: true
+      runAsUser: 999
+      runAsGroup: 999
+    securityContext:
+      allowPrivilegeEscalation: false
+      capabilities:
+        drop:
+          - ALL
+      seccompProfile:
+        type: RuntimeDefault
     tolerations: []
     topologySpreadConstraints: []
     # nodeAffinity: {}
