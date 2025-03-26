@@ -183,7 +183,7 @@ cvat:
   frontend:
     replicas: 1
     image: cvat/ui
-    tag: v2.30.0
+    tag: v2.30.0-genesis
     imagePullPolicy: Always
     labels: {}
     #  test: test
