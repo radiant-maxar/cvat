@@ -1,0 +1,59 @@
+---
+name: Build and Push CVAT/UI Dev
+
+permissions:
+  id-token: write
+  contents: read
+
+on:
+  push:
+    branches:
+      - "dev-release/**"
+    paths:
+      - "cvat-data/**"
+      - "cvat-core/**"
+      - "cvat-canvas/**"
+      - "cvat-canvas3d/**"
+      - "cvat-ui/**"
+      - "Dockerfile.ui"
+
+
+env:
+  AWS_REGION: "us-east-1"
+  ECR_REGISTRY: "470769982595.dkr.ecr.us-east-1.amazonaws.com"
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::470769982595:role/github-actions-radiant-maxar-cvat-role
+
+      - name: Get STS caller identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Determine Docker Image Tag
+        id: determine-tag
+        run: |
+          VERSION=$(cut -d / -f 2 <<< ${GITHUB_REF#refs/heads/})
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push cvat/ui
+        uses: docker/build-push-action@v5
+        with:
+          file: Dockerfile.ui
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cvat/ui:${{ steps.determine-tag.outputs.tag }}
