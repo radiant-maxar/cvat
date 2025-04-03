@@ -38,7 +38,7 @@ import Spin from 'antd/lib/spin';
 import config from 'config';
 
 import { Organization, getCore } from 'cvat-core-wrapper';
-import { CVATLogo } from 'icons';
+import CVATLogo from 'components/common/cvat-logo';
 import ChangePasswordDialog from 'components/change-password-modal/change-password-modal';
 import CVATTooltip from 'components/common/cvat-tooltip';
 import { switchSettingsModalVisible as switchSettingsModalVisibleAction } from 'actions/settings-actions';
