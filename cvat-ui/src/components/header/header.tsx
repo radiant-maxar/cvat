@@ -845,6 +845,44 @@ function HeaderComponent(props: Props): JSX.Element {
         .map(({ component, weight }): typeof menuItems[0] => [component({ targetProps: props }), weight]),
     );
 
+    // ---------- Being adding menu to header ---------
+    // Define the menu items with sorting priority
+    const maxarMenuItems: [NonNullable<MenuProps['items']>[0], number][] = [];
+
+    // Add Upload items (with sorting priority 30)
+    maxarMenuItems.push(
+        [{
+            key: 'uploadChipped',
+            icon: <FolderAddOutlined style={{ fontSize: '20px' }} />,
+            onClick: () => showUploadToProjectModal(),
+            label: 'Upload chips - new project + tasks',
+        }, 30],
+        [{
+            key: 'uploadExisting',
+            icon: <FileAddOutlined style={{ fontSize: '20px' }} />,
+            onClick: () => showUploadToExistingProjectModal(),
+            label: 'Upload chips -   existing project',
+        }, 30],
+    );
+
+    // Convert to properly structured menu items
+    const structMaxarMenuItems: MenuProps['items'] = [{
+        key: 'upload-group',
+        type: 'group', // Creates the "Upload" header
+        label: 'Upload',
+        children: [
+            {
+                type: 'divider',
+            },
+            ...maxarMenuItems
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                .filter(([item, _]) => item && String(item.key).startsWith('upload')) // Ensure item is defined
+                // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                .map(([item, _]) => item!), // Access items only if they exist
+        ],
+    }];
+    // ---------- End of adding menu to header ---------
+
     const getButtonClassName = (value: string, highlightable = true): string => {
         // eslint-disable-next-line security/detect-non-literal-regexp
         const regex = new RegExp(`${value}$`);
