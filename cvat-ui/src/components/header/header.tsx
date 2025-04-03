@@ -28,6 +28,7 @@ import Layout from 'antd/lib/layout';
 import Button from 'antd/lib/button';
 import Dropdown from 'antd/lib/dropdown';
 import Modal from 'antd/lib/modal';
+import { Form, Input, Checkbox, Select } from 'antd';
 import Text from 'antd/lib/typography/Text';
 import notification from 'antd/lib/notification';
 
@@ -45,6 +46,7 @@ import { useIsMounted, usePlugins } from 'utils/hooks';
 import GlobalHotKeys, { KeyMap } from 'utils/mousetrap-react';
 import { ShortcutScope } from 'utils/enums';
 import { subKeyMap } from 'utils/component-subkeymap';
+import CustomIcon from '../../maxar/assets/maxar_icon_yellow.svg';
 import SettingsModal from './settings-modal/settings-modal';
 import OrganizationsSearch from './organizations-search';
 
@@ -277,6 +279,69 @@ function HeaderComponent(props: Props): JSX.Element {
             },
         });
     }, [about]);
+
+    // --------Begin Maxar custom plugin-------------------------
+    const [form] = Form.useForm();
+
+    // eslint-disable-next-line max-len
+    const generateFusedURL = (values: Record<string, any>): `https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_2HSFCw7zvK4PJRvfhFod2X/run/file?${string}` => {
+        const baseURL = 'https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_2HSFCw7zvK4PJRvfhFod2X/run/file';
+        // Mapping form values to URL query params
+        const params = new URLSearchParams({
+            dtype_out_raster: 'png', // Assuming default output type
+            dtype_out_vector: 'html',
+            bucket_directory: values.bucket_directory || '',
+            crs: values.crs.replace('EPSG:', ''), // Remove 'EPSG:' from CRS
+            batch_size: values.batch_size.toString(),
+            create_tasks: values.create_tasks.toString(),
+            upload_annotations: values.upload_annotations.toString(),
+            use_default_attributes: values.use_default_attributes.toString(),
+            ignore_geo: values.ignore_geo.toString(),
+            no_label_attributes: values.no_label_attributes.toString(),
+            bucket_name: values.bucket_name || '',
+            project_name: encodeURIComponent(values.project_name || ''),
+            organization: encodeURIComponent(values.organization || ''),
+            user_id: user.id,
+            project_id: values.project_id || -1,
+        });
+
+        return `${baseURL}?${params.toString()}`;
+    };
+
+    const fetchFusedData = async (url: string): Promise<any> => {
+        try {
+            const response = await fetch(url, {
+                method: 'GET',
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP error! Status: ${response.status}`);
+            }
+
+            const data = await response.text();
+            const parser = new DOMParser();
+            const doc = parser.parseFromString(data, 'text/html');
+            const table = doc.querySelector('.dataframe');
+            if (table) {
+                const headers = Array.from(table.querySelectorAll('thead th'))
+                    .map((th) => th?.textContent?.trim() ?? '')
+                    .filter((h) => h); // Remove empty headers (first column)
+                const values = Array.from(table.querySelectorAll('tbody tr'))
+                    .map((row) => Array.from(row.querySelectorAll('td'))
+                        .map((td) => td?.textContent?.trim() ?? ''));
+                const df = values.map((row) => Object.fromEntries(headers.map((key, i) => [key, row[i]])));
+
+                if (df.length > 0 && df[0].status === '200') {
+                    return df[0].msg;
+                }
+                throw new Error(`HTTP error! Status: ${df[0].msg}`);
+            }
+            return null;
+        } catch (error) {
+            console.error('Error fetching data:', error);
+            return null;
+        }
+    };
 
     const closeSettings = useCallback(() => {
         switchSettingsModalVisible(false);
