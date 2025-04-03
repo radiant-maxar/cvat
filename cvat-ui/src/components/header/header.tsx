@@ -49,7 +49,7 @@ import { useIsMounted, usePlugins } from 'utils/hooks';
 import GlobalHotKeys, { KeyMap } from 'utils/mousetrap-react';
 import { ShortcutScope } from 'utils/enums';
 import { subKeyMap } from 'utils/component-subkeymap';
-import CustomIcon from '../../maxar/assets/maxar_icon_yellow.svg';
+import CustomIcon from '../../maxar/assets/maxar_icon_gray.svg';
 import SettingsModal from './settings-modal/settings-modal';
 import OrganizationsSearch from './organizations-search';
 
