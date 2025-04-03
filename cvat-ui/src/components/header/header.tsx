@@ -9,7 +9,7 @@ import { connect } from 'react-redux';
 import { useHistory, useLocation } from 'react-router';
 import { Row, Col } from 'antd/lib/grid';
 import { MenuProps } from 'antd/lib/menu';
-import {
+import Icon, {
     SettingOutlined,
     InfoCircleOutlined,
     EditOutlined,
@@ -22,19 +22,23 @@ import {
     UserOutlined,
     TeamOutlined,
     PlusOutlined,
-    MailOutlined,
+    MailOutlined, FolderAddOutlined, FileAddOutlined,
 } from '@ant-design/icons';
 import Layout from 'antd/lib/layout';
 import Button from 'antd/lib/button';
 import Dropdown from 'antd/lib/dropdown';
 import Modal from 'antd/lib/modal';
-import { Form, Input, Checkbox, Select } from 'antd';
+import {
+    Form, Input, Checkbox, Select,
+} from 'antd';
 import Text from 'antd/lib/typography/Text';
 import notification from 'antd/lib/notification';
+import Spin from 'antd/lib/spin';
 
 import config from 'config';
 
 import { Organization, getCore } from 'cvat-core-wrapper';
+import { CVATLogo } from 'icons';
 import ChangePasswordDialog from 'components/change-password-modal/change-password-modal';
 import CVATTooltip from 'components/common/cvat-tooltip';
 import CVATLogo from 'components/common/cvat-logo';
@@ -895,7 +899,7 @@ function HeaderComponent(props: Props): JSX.Element {
         <Layout.Header className='cvat-header'>
             <GlobalHotKeys keyMap={subKeyMap(componentShortcuts, keyMap)} handlers={handlers} />
             <div className='cvat-left-header'>
-                <CVATLogo />
+                <Icon className='cvat-logo-icon' component={CVATLogo} />
                 <Button
                     className={getButtonClassName('projects')}
                     type='link'
@@ -983,6 +987,26 @@ function HeaderComponent(props: Props): JSX.Element {
                         Analytics
                     </Button>
                 ) : null}
+                <Dropdown
+                    trigger={['click']}
+                    destroyPopupOnHide
+                    placement='bottom'
+                    overlayClassName='cvat-header-menu-maxar-tools-dropdown'// Apply custom width only here
+                    menu={{ items: structMaxarMenuItems }}
+                    className='cvat-header-menu-maxar-tools-dropdown'
+                >
+                    <span>
+                        <CustomIcon className='cvat-header-dropdown-maxar-icon' style={{ width: '15px', height: '15px', fill: 'gray' }} />
+                        <Row>
+                            <Col span={24}>
+                                <Text strong className='cvat-header-maxar-menu-dropdown'>
+                                    Maxar Tools
+                                </Text>
+                            </Col>
+                        </Row>
+                        <CaretDownOutlined className='cvat-header-dropdown-icon' />
+                    </span>
+                </Dropdown>
             </div>
             <div className='cvat-right-header'>
                 <CVATTooltip overlay='Click to open repository'>
