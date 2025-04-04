@@ -994,16 +994,28 @@ function HeaderComponent(props: Props): JSX.Element {
                     menu={{ items: structMaxarMenuItems }}
                     className='cvat-header-menu-maxar-tools-dropdown'
                 >
-                    <span>
-                        <CustomIcon className='cvat-header-dropdown-maxar-icon' style={{ width: '15px', height: '15px', fill: 'gray' }} />
+                    <span style={{ display: 'flex', alignItems: 'center' }}>
+                        <CustomIcon
+                            className='cvat-header-dropdown-maxar-icon'
+                            style={{
+                                width: '20px', height: '20px', fill: 'gray', marginRight: '8px', cursor: 'pointer',
+                            }}
+                        />
                         <Row>
                             <Col span={24}>
-                                <Text strong className='cvat-header-maxar-menu-dropdown'>
+                                <Text
+                                    strong
+                                    className='cvat-header-maxar-menu-dropdown'
+                                    style={{ whiteSpace: 'nowrap', cursor: 'pointer' }}
+                                >
                                     Maxar Tools
                                 </Text>
                             </Col>
                         </Row>
-                        <CaretDownOutlined className='cvat-header-dropdown-icon' />
+                        <CaretDownOutlined
+                            className='cvat-header-dropdown-icon'
+                            style={{ cursor: 'pointer', marginLeft: '4px' }}
+                        />
                     </span>
                 </Dropdown>
             </div>
