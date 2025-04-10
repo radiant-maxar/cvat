@@ -1,0 +1,75 @@
+---
+name: Build and Push CVAT/UI Prod
+
+permissions:
+  id-token: write
+  contents: write  # Write permission required to create Tag in repo
+
+on:
+  pull_request:
+    types:
+      - closed
+    branches:
+      - main
+    paths:
+      - "cvat-data/**"
+      - "cvat-core/**"
+      - "cvat-canvas/**"
+      - "cvat-canvas3d/**"
+      - "cvat-ui/**"
+      - "Dockerfile.ui"
+
+env:
+  AWS_REGION: "us-east-1"
+  ECR_REGISTRY: 992084318163.dkr.ecr.us-east-1.amazonaws.com
+
+jobs:
+  build-and-push:
+    # Run if PR merged and source branch starts with dev-release/
+    if: github.event.pull_request.merged == true && startswith(github.head_ref, 'dev-release/')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          audience: sts.amazonaws.com
+          aws-region: ${{ env.AWS_REGION }}
+          role-to-assume: arn:aws:iam::992084318163:role/github-actions-radiant-maxar-cvat-role
+
+      - name: Get STS caller identity
+        run: |
+          aws sts get-caller-identity
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region ${{ env.AWS_REGION }} | docker login --username AWS --password-stdin ${{ env.ECR_REGISTRY }}
+
+      - name: Determine Docker Image Tag
+        id: determine-tag
+        # Determine Tag by source branch name
+        run: |
+          VERSION=$(cut -d / -f 2 <<< ${{github.head_ref}})
+          echo "tag=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push cvat/ui
+        uses: docker/build-push-action@v5
+        with:
+          file: Dockerfile.ui
+          push: true
+          tags: |
+            ${{ env.ECR_REGISTRY }}/cvat/ui:${{ steps.determine-tag.outputs.tag }}
+
+        # Create Tag in repo
+      - name: Create GitHub Tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            github.rest.git.createRef({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              ref: 'refs/tags/${{ steps.determine-tag.outputs.tag }}',
+              sha: context.sha
+            })
