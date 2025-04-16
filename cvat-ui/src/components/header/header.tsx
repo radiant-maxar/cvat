@@ -306,6 +306,7 @@ function HeaderComponent(props: Props): JSX.Element {
             organization: encodeURIComponent(values.organization || ''),
             user_id: user.id,
             project_id: values.project_id || -1,
+            host: window.location.hostname,
         });
 
         return `${baseURL}?${params.toString()}`;
@@ -495,7 +496,7 @@ function HeaderComponent(props: Props): JSX.Element {
                             content: (
                                 <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
                                     <Spin />
-                                    <span>Creating project, please wait...</span>
+                                    <span>Generating project trigger, please wait...</span>
                                 </div>
                             ),
                             cancelButtonProps: { style: { display: 'none' } }, // Hide cancel button
@@ -503,29 +504,17 @@ function HeaderComponent(props: Props): JSX.Element {
                             closable: false, // Prevent closing while loading
                         });
                         const fusedURL = generateFusedURL(values);
-                        const responseData = await fetchFusedData(fusedURL);
-                        console.log('API Response:', responseData);
-                        if (responseData) {
-                            form.resetFields();
-                            loadingModal.destroy();
-                            Modal.success({
-                                title: 'Success',
-                                content: 'Project created successfully',
-                                onOk: () => {
-                                    Modal.destroyAll(); // Close all modals (alert + form popup)
-                                    window.location.reload();
-                                },
-                            });
-                        } else {
-                            loadingModal.destroy();
-                            Modal.error({
-                                title: 'Project creation error',
-                                content: 'The project was not created. Please contact ipr.support@maxar.com',
-                                onOk: () => {
-                                    Modal.destroyAll(); // Close all modals (alert + form popup)
-                                },
-                            });
-                        }
+                        form.resetFields();
+                        loadingModal.destroy();
+                        window.open(fusedURL, '_blank', 'noopener,noreferrer');
+                        Modal.success({
+                            title: 'Success',
+                            content: ' successfully',
+                            onOk: () => {
+                                Modal.destroyAll(); // Close all modals (alert + form popup)
+                                window.location.reload();
+                            },
+                        });
                     })
                     .catch((error) => {
                         console.error('Validation Error:', error);
