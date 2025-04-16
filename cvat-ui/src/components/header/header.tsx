@@ -26,6 +26,7 @@ import Icon, {
     FolderAddOutlined,
     FileAddOutlined,
     CloudUploadOutlined,
+    UploadOutlined,
 } from '@ant-design/icons';
 import Layout from 'antd/lib/layout';
 import Button from 'antd/lib/button';
@@ -329,7 +330,7 @@ function HeaderComponent(props: Props): JSX.Element {
             chip_ext: values.chip_ext || 'png',
             ignore_geo: values.ignore_geo?.toString() || 'false',
             boundless: values.boundless?.toString() || 'false',
-            use_aoi_geojson: values.use_aoi_geojson?.toString() || 'false',
+            // use_aoi_geojson: values.use_aoi_geojson?.toString() || 'false',
             instance_type: values.instance_type || 'm5.4xlarge',
             instance_disk_size_gb: values.instance_disk_size_gb?.toString() || '100',
             host: window.location.hostname,
@@ -720,7 +721,7 @@ function HeaderComponent(props: Props): JSX.Element {
         });
     }, [form]);
 
-    const showChipProcessingForm = useCallback((): void => {
+    const showChipProcessingForm = useCallback((project = false): void => {
         Modal.info({
             title: 'Chip Processor Setup',
             style: { padding: '16px' },
@@ -739,7 +740,7 @@ function HeaderComponent(props: Props): JSX.Element {
                         chip_ext: 'png',
                         ignore_geo: false,
                         boundless: false,
-                        use_aoi_geojson: false,
+                        // use_aoi_geojson: false,
                         instance_type: 'm5.4xlarge',
                         instance_disk_size_gb: 100,
                     }}
@@ -760,6 +761,16 @@ function HeaderComponent(props: Props): JSX.Element {
                         <Input placeholder='Enter directory in bucket' />
                     </Form.Item>
 
+                    {project && (
+                        <Form.Item
+                            label='Project ID'
+                            name='project_id'
+                            rules={[{ required: true, message: 'Please enter a project id' }]}
+                        >
+                            <Input placeholder='Enter project id' />
+                        </Form.Item>
+                    )}
+
                     <Form.Item
                         label='Coordinate Reference System (CRS)'
                         name='crs'
@@ -777,10 +788,10 @@ function HeaderComponent(props: Props): JSX.Element {
                     </Form.Item>
 
                     <Form.Item
-                        label='Image Extensions (comma-separated)'
+                        label='Image Extension'
                         name='extensions'
                     >
-                        <Input placeholder='.tif,.tiff' />
+                        <Input placeholder='.tif' />
                     </Form.Item>
 
                     <Form.Item
@@ -801,11 +812,11 @@ function HeaderComponent(props: Props): JSX.Element {
                                 <Checkbox>Use Boundless Mode</Checkbox>
                             </Form.Item>
                         </Col>
-                        <Col span={8}>
+                        {/* <Col span={8}>
                             <Form.Item name='use_aoi_geojson' valuePropName='checked'>
                                 <Checkbox>Use AOI GeoJSON</Checkbox>
                             </Form.Item>
-                        </Col>
+                        </Col> */}
                     </Row>
 
                     <Form.Item
@@ -1013,10 +1024,10 @@ function HeaderComponent(props: Props): JSX.Element {
 
     // ---------- Being adding menu to header ---------
     // Define the menu items with sorting priority
-    const maxarMenuItems: [NonNullable<MenuProps['items']>[0], number][] = [];
+    const maxarUploadMenuItems: [NonNullable<MenuProps['items']>[0], number][] = [];
 
     // Add Upload items (with sorting priority 30)
-    maxarMenuItems.push(
+    maxarUploadMenuItems.push(
         [{
             key: 'uploadChipped',
             icon: <FolderAddOutlined style={{ fontSize: '20px' }} />,
@@ -1029,30 +1040,58 @@ function HeaderComponent(props: Props): JSX.Element {
             onClick: () => showUploadToExistingProjectModal(),
             label: 'Upload chips - existing project',
         }, 30],
+    );
+
+    const maxarChipMenuItems: [NonNullable<MenuProps['items']>[0], number][] = [];
+
+    // Add Upload items (with sorting priority 30)
+    maxarChipMenuItems.push(
         [{
             key: 'chipImages',
             icon: <CloudUploadOutlined style={{ fontSize: '20px' }} />,
             onClick: () => showChipProcessingForm(),
-            label: 'Create chips',
+            label: 'Chip Images Into S3',
+        }, 30],
+        [{
+            key: 'chipImagesIntoProject',
+            icon: <UploadOutlined style={{ fontSize: '20px' }} />,
+            onClick: () => showChipProcessingForm(true),
+            label: 'Chip Images Into Project',
         }, 30],
     );
 
     // Convert to properly structured menu items
-    const structMaxarMenuItems: MenuProps['items'] = [{
-        key: 'upload-group',
-        type: 'group', // Creates the "Upload" header
-        label: 'Upload',
-        children: [
-            {
-                type: 'divider',
-            },
-            ...maxarMenuItems
-                // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                .filter(([item, _]) => item && String(item.key).startsWith('upload')) // Ensure item is defined
-                // eslint-disable-next-line @typescript-eslint/no-unused-vars
-                .map(([item, _]) => item!), // Access items only if they exist
-        ],
-    }];
+    const structMaxarMenuItems: MenuProps['items'] = [
+        {
+            key: 'upload-group',
+            type: 'group', // Creates the "Upload" header
+            label: 'Upload',
+            children: [
+                {
+                    type: 'divider',
+                },
+                ...maxarUploadMenuItems
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    .filter(([item, _]) => item && String(item.key).startsWith('upload')) // Ensure item is defined
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    .map(([item, _]) => item!), // Access items only if they exist
+            ],
+        },
+        {
+            key: 'chip-group',
+            type: 'group', // Creates the "Upload" header
+            label: 'Chipping',
+            children: [
+                {
+                    type: 'divider',
+                },
+                ...maxarChipMenuItems
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    .filter(([item, _]) => item && String(item.key).startsWith('chip')) // Ensure item is defined
+                    // eslint-disable-next-line @typescript-eslint/no-unused-vars
+                    .map(([item, _]) => item!), // Access items only if they exist
+            ],
+        }];
     // ---------- End of adding menu to header ---------
 
     const getButtonClassName = (value: string, highlightable = true): string => {
