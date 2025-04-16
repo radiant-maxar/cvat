@@ -22,7 +22,10 @@ import Icon, {
     UserOutlined,
     TeamOutlined,
     PlusOutlined,
-    MailOutlined, FolderAddOutlined, FileAddOutlined,
+    MailOutlined,
+    FolderAddOutlined,
+    FileAddOutlined,
+    CloudUploadOutlined,
 } from '@ant-design/icons';
 import Layout from 'antd/lib/layout';
 import Button from 'antd/lib/button';
@@ -287,8 +290,9 @@ function HeaderComponent(props: Props): JSX.Element {
     const [form] = Form.useForm();
 
     // eslint-disable-next-line max-len
-    const generateFusedURL = (values: Record<string, any>): `https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_2HSFCw7zvK4PJRvfhFod2X/run/file?${string}` => {
-        const baseURL = 'https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_2HSFCw7zvK4PJRvfhFod2X/run/file';
+    const generateFusedUploadURL = (values: Record<string, any>): `https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_5falAuzn1SZLRNSugJNapg/run/file?${string}` => {
+        const baseURL = 'https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_5falAuzn1SZLRNSugJNapg/run/file';
+
         // Mapping form values to URL query params
         const params = new URLSearchParams({
             dtype_out_raster: 'png', // Assuming default output type
@@ -307,11 +311,32 @@ function HeaderComponent(props: Props): JSX.Element {
             user_id: user.id,
             project_id: values.project_id || -1,
             host: window.location.hostname,
+            cvat_src: 'True',
         });
 
         return `${baseURL}?${params.toString()}`;
     };
 
+    // eslint-disable-next-line max-len
+    const generateChipProcessingURL = (values: Record<string, any>): `https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_6PUjs9DovMK6rGCIeeRM1Z/run/file?${string}` => {
+        const baseURL = 'https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_6PUjs9DovMK6rGCIeeRM1Z/run/file';
+        const params = new URLSearchParams({
+            bucket_name: values.bucket_name || '',
+            bucket_directory: values.bucket_directory || '',
+            crs: values.crs.replace('EPSG:', ''), // or just values.crs.toString() if it's already an int
+            chip_size: values.chip_size?.toString() || '',
+            extensions: values.extensions || '.tif',
+            chip_ext: values.chip_ext || 'png',
+            ignore_geo: values.ignore_geo?.toString() || 'false',
+            boundless: values.boundless?.toString() || 'false',
+            use_aoi_geojson: values.use_aoi_geojson?.toString() || 'false',
+            instance_type: values.instance_type || 'm5.4xlarge',
+            instance_disk_size_gb: values.instance_disk_size_gb?.toString() || '100',
+            host: window.location.hostname,
+            cvat_src: 'True',
+        });
+        return `${baseURL}?${params.toString()}`;
+    };
     const fetchFusedData = async (url: string): Promise<any> => {
         try {
             const response = await fetch(url, {
@@ -503,15 +528,15 @@ function HeaderComponent(props: Props): JSX.Element {
                             okButtonProps: { style: { display: 'none' } },
                             closable: false, // Prevent closing while loading
                         });
-                        const fusedURL = generateFusedURL(values);
+                        const fusedURL = generateFusedUploadURL(values);
                         form.resetFields();
                         loadingModal.destroy();
                         window.open(fusedURL, '_blank', 'noopener,noreferrer');
                         Modal.success({
                             title: 'Success',
-                            content: ' successfully',
+                            content: `A new tab to view the runner logs has been opened. ${fusedURL}`,
                             onOk: () => {
-                                Modal.destroyAll(); // Close all modals (alert + form popup)
+                                Modal.destroyAll();
                                 window.location.reload();
                             },
                         });
@@ -624,7 +649,7 @@ function HeaderComponent(props: Props): JSX.Element {
                                 name='batch_size'
                                 rules={[{ required: true, message: 'Please enter a batch size' }]}
                             >
-                                <Input placeholder='Enter batch size' />
+                                <Input value={100} />
                             </Form.Item>
                         </Col>
                     </Row>
@@ -666,7 +691,7 @@ function HeaderComponent(props: Props): JSX.Element {
             onOk: () => {
                 form.validateFields()
                     .then(async (values) => {
-                        const fusedURL = generateFusedURL(values);
+                        const fusedURL = generateFusedUploadURL(values);
                         const responseData = await fetchFusedData(fusedURL);
                         console.log('API Response:', responseData);
                         if (responseData) {
@@ -690,6 +715,155 @@ function HeaderComponent(props: Props): JSX.Element {
                     })
                     .catch((error) => {
                         console.error('Validation Error:', error);
+                    });
+            },
+        });
+    }, [form]);
+
+    const showChipProcessingForm = useCallback((): void => {
+        Modal.info({
+            title: 'Chip Processor Setup',
+            style: { padding: '16px' },
+            closable: true,
+            keyboard: true,
+            content: (
+                <Form
+                    form={form}
+                    layout='vertical'
+                    initialValues={{
+                        bucket_name: 'mxr-as-prod-fused-shared',
+                        bucket_directory: '',
+                        crs: 4326,
+                        chip_size: '',
+                        extensions: '.tif',
+                        chip_ext: 'png',
+                        ignore_geo: false,
+                        boundless: false,
+                        use_aoi_geojson: false,
+                        instance_type: 'm5.4xlarge',
+                        instance_disk_size_gb: 100,
+                    }}
+                >
+                    <Form.Item
+                        label='Bucket Name'
+                        name='bucket_name'
+                        rules={[{ required: true, message: 'Please enter a bucket name' }]}
+                    >
+                        <Input placeholder='Enter S3 bucket name' />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Bucket Directory'
+                        name='bucket_directory'
+                        rules={[{ required: true, message: 'Please enter a bucket directory' }]}
+                    >
+                        <Input placeholder='Enter directory in bucket' />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Coordinate Reference System (CRS)'
+                        name='crs'
+                        rules={[{ required: true, message: 'Please enter a CRS (e.g., 4326)' }]}
+                    >
+                        <Input type='number' placeholder='EPSG code (e.g., 4326)' />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Chip Size (pixels)'
+                        name='chip_size'
+                        rules={[{ required: true, message: 'Please enter a chip size' }]}
+                    >
+                        <Input type='number' />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Image Extensions (comma-separated)'
+                        name='extensions'
+                    >
+                        <Input placeholder='.tif,.tiff' />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Output Chip Extension'
+                        name='chip_ext'
+                    >
+                        <Input placeholder='png, jpg, etc.' />
+                    </Form.Item>
+
+                    <Row gutter={16}>
+                        <Col span={8}>
+                            <Form.Item name='ignore_geo' valuePropName='checked'>
+                                <Checkbox>Ignore Geo</Checkbox>
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                            <Form.Item name='boundless' valuePropName='checked'>
+                                <Checkbox>Use Boundless Mode</Checkbox>
+                            </Form.Item>
+                        </Col>
+                        <Col span={8}>
+                            <Form.Item name='use_aoi_geojson' valuePropName='checked'>
+                                <Checkbox>Use AOI GeoJSON</Checkbox>
+                            </Form.Item>
+                        </Col>
+                    </Row>
+
+                    <Form.Item
+                        label='Instance Type'
+                        name='instance_type'
+                        rules={[{ required: true, message: 'Please select an instance type' }]}
+                    >
+                        <Select
+                            options={[
+                                { value: 'm5.large', label: 'm5.large' },
+                                { value: 'm5.2xlarge', label: 'm5.2xlarge' },
+                                { value: 'm5.4xlarge', label: 'm5.4xlarge' },
+                                { value: 'm5.12xlarge', label: 'm5.12xlarge' },
+                            ]}
+                        />
+                    </Form.Item>
+
+                    <Form.Item
+                        label='Disk Size (GB)'
+                        name='instance_disk_size_gb'
+                        rules={[{ required: true, message: 'Please enter disk size in GB' }]}
+                    >
+                        <Input type='number' placeholder='e.g., 100' />
+                    </Form.Item>
+                </Form>
+            ),
+            width: 700,
+            okText: 'Submit',
+            onOk: () => {
+                form.validateFields()
+                    .then(async (values) => {
+                        const loadingModal = Modal.confirm({
+                            title: 'Processing...',
+                            content: (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <Spin />
+                                    <span>Generating project trigger, please wait...</span>
+                                </div>
+                            ),
+                            cancelButtonProps: { style: { display: 'none' } }, // Hide cancel button
+                            okButtonProps: { style: { display: 'none' } },
+                            closable: false, // Prevent closing while loading
+                        });
+                        const fusedURL = generateChipProcessingURL(values);
+                        form.resetFields();
+                        loadingModal.destroy();
+                        window.open(fusedURL, '_blank', 'noopener,noreferrer');
+                        Modal.success({
+                            title: 'Success',
+                            content: `A new tab to view the runner logs has been opened. ${fusedURL}`,
+                            onOk: () => {
+                                Modal.destroyAll();
+                                window.location.reload();
+                            },
+                        });
+                    })
+                    .catch((err) => {
+                        console.error('Validation failed:', err);
                     });
             },
         });
@@ -853,7 +1027,13 @@ function HeaderComponent(props: Props): JSX.Element {
             key: 'uploadExisting',
             icon: <FileAddOutlined style={{ fontSize: '20px' }} />,
             onClick: () => showUploadToExistingProjectModal(),
-            label: 'Upload chips -   existing project',
+            label: 'Upload chips - existing project',
+        }, 30],
+        [{
+            key: 'chipImages',
+            icon: <CloudUploadOutlined style={{ fontSize: '20px' }} />,
+            onClick: () => showChipProcessingForm(),
+            label: 'Create chips',
         }, 30],
     );
 
