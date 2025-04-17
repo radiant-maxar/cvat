@@ -296,7 +296,6 @@ function HeaderComponent(props: Props): JSX.Element {
 
         // Mapping form values to URL query params
         const params = new URLSearchParams({
-            dtype_out_raster: 'png', // Assuming default output type
             dtype_out_vector: 'html',
             bucket_directory: values.bucket_directory || '',
             crs: values.crs.replace('EPSG:', ''), // Remove 'EPSG:' from CRS
@@ -338,40 +337,6 @@ function HeaderComponent(props: Props): JSX.Element {
         });
         return `${baseURL}?${params.toString()}`;
     };
-    const fetchFusedData = async (url: string): Promise<any> => {
-        try {
-            const response = await fetch(url, {
-                method: 'GET',
-            });
-
-            if (!response.ok) {
-                throw new Error(`HTTP error! Status: ${response.status}`);
-            }
-
-            const data = await response.text();
-            const parser = new DOMParser();
-            const doc = parser.parseFromString(data, 'text/html');
-            const table = doc.querySelector('.dataframe');
-            if (table) {
-                const headers = Array.from(table.querySelectorAll('thead th'))
-                    .map((th) => th?.textContent?.trim() ?? '')
-                    .filter((h) => h); // Remove empty headers (first column)
-                const values = Array.from(table.querySelectorAll('tbody tr'))
-                    .map((row) => Array.from(row.querySelectorAll('td'))
-                        .map((td) => td?.textContent?.trim() ?? ''));
-                const df = values.map((row) => Object.fromEntries(headers.map((key, i) => [key, row[i]])));
-
-                if (df.length > 0 && df[0].status === '200') {
-                    return df[0].msg;
-                }
-                throw new Error(`HTTP error! Status: ${df[0].msg}`);
-            }
-            return null;
-        } catch (error) {
-            console.error('Error fetching data:', error);
-            return null;
-        }
-    };
 
     const showUploadToProjectModal = useCallback((): void => {
         Modal.info({
@@ -389,8 +354,8 @@ function HeaderComponent(props: Props): JSX.Element {
                         bucket_directory: '',
                         crs: 'EPSG:4326',
                         project_name: '',
-                        organization: '',
-                        batch_size: '',
+                        organization: currentOrganization.slug,
+                        batch_size: 100,
                         create_tasks: true,
                         upload_annotations: true,
                         use_default_attributes: true,
@@ -535,7 +500,7 @@ function HeaderComponent(props: Props): JSX.Element {
                         window.open(fusedURL, '_blank', 'noopener,noreferrer');
                         Modal.success({
                             title: 'Success',
-                            content: `A new tab to view the runner logs has been opened. ${fusedURL}`,
+                            content: 'A new tab to view the runner logs has been opened.',
                             onOk: () => {
                                 Modal.destroyAll();
                                 window.location.reload();
@@ -692,27 +657,30 @@ function HeaderComponent(props: Props): JSX.Element {
             onOk: () => {
                 form.validateFields()
                     .then(async (values) => {
+                        const loadingModal = Modal.confirm({
+                            title: 'Processing...',
+                            content: (
+                                <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                                    <Spin />
+                                    <span>Generating project trigger, please wait...</span>
+                                </div>
+                            ),
+                            cancelButtonProps: { style: { display: 'none' } }, // Hide cancel button
+                            okButtonProps: { style: { display: 'none' } },
+                            closable: false, // Prevent closing while loading
+                        });
                         const fusedURL = generateFusedUploadURL(values);
-                        const responseData = await fetchFusedData(fusedURL);
-                        console.log('API Response:', responseData);
-                        if (responseData) {
-                            form.resetFields();
-                            Modal.success({
-                                title: 'Success',
-                                content: 'Project created successfully',
-                                onOk: () => {
-                                    Modal.destroyAll(); // Close all modals (alert + form popup)
-                                },
-                            });
-                        } else {
-                            Modal.error({
-                                title: 'Project creation error',
-                                content: 'The project was not created. Please contact ipr.support@maxar.com',
-                                onOk: () => {
-                                    Modal.destroyAll(); // Close all modals (alert + form popup)
-                                },
-                            });
-                        }
+                        form.resetFields();
+                        loadingModal.destroy();
+                        window.open(fusedURL, '_blank', 'noopener,noreferrer');
+                        Modal.success({
+                            title: 'Success',
+                            content: 'A new tab to view the runner logs has been opened.',
+                            onOk: () => {
+                                Modal.destroyAll();
+                                window.location.reload();
+                            },
+                        });
                     })
                     .catch((error) => {
                         console.error('Validation Error:', error);
