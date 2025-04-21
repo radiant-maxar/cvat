@@ -846,7 +846,7 @@ function HeaderComponent(props: Props): JSX.Element {
                         window.open(fusedURL, '_blank', 'noopener,noreferrer');
                         Modal.success({
                             title: 'Success',
-                            content: `A new tab to view the runner logs has been opened. ${fusedURL}`,
+                            content: 'A new tab to view the runner logs has been opened.',
                             onOk: () => {
                                 Modal.destroyAll();
                                 window.location.reload();
