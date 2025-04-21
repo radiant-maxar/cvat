@@ -321,6 +321,7 @@ function HeaderComponent(props: Props): JSX.Element {
     const generateChipProcessingURL = (values: Record<string, any>): `https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_6PUjs9DovMK6rGCIeeRM1Z/run/file?${string}` => {
         const baseURL = 'https://workbench.mxr-prod.fused.io/server/v1/realtime-shared/fsh_6PUjs9DovMK6rGCIeeRM1Z/run/file';
         const params = new URLSearchParams({
+            dtype_out_vector: 'html',
             bucket_name: values.bucket_name || '',
             bucket_directory: values.bucket_directory || '',
             crs: values.crs.replace('EPSG:', ''), // Remove 'EPSG:' from CRS
