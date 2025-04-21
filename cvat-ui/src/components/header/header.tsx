@@ -702,8 +702,8 @@ function HeaderComponent(props: Props): JSX.Element {
                     initialValues={{
                         bucket_name: 'mxr-as-prod-fused-shared',
                         bucket_directory: '',
-                        crs: 4326,
-                        chip_size: '',
+                        crs: 'EPSG:4326',
+                        chip_size: '1024',
                         extensions: '.tif',
                         chip_ext: 'png',
                         ignore_geo: false,
@@ -718,7 +718,7 @@ function HeaderComponent(props: Props): JSX.Element {
                         name='bucket_name'
                         rules={[{ required: true, message: 'Please enter a bucket name' }]}
                     >
-                        <Input placeholder='Enter S3 bucket name' />
+                        <Input disabled />
                     </Form.Item>
 
                     <Form.Item
