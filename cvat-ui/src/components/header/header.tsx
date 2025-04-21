@@ -323,7 +323,7 @@ function HeaderComponent(props: Props): JSX.Element {
         const params = new URLSearchParams({
             bucket_name: values.bucket_name || '',
             bucket_directory: values.bucket_directory || '',
-            crs: values.crs.replace('EPSG:', ''), // or just values.crs.toString() if it's already an int
+            crs: values.crs.replace('EPSG:', ''), // Remove 'EPSG:' from CRS
             chip_size: values.chip_size?.toString() || '',
             extensions: values.extensions || '.tif',
             chip_ext: values.chip_ext || 'png',
@@ -530,7 +530,7 @@ function HeaderComponent(props: Props): JSX.Element {
                         bucket_directory: '',
                         crs: 'EPSG:4326',
                         project_name: '',
-                        organization: '',
+                        organization: currentOrganization.slug,
                         batch_size: '',
                         create_tasks: true,
                         upload_annotations: true,
@@ -742,9 +742,21 @@ function HeaderComponent(props: Props): JSX.Element {
                     <Form.Item
                         label='Coordinate Reference System (CRS)'
                         name='crs'
-                        rules={[{ required: true, message: 'Please enter a CRS (e.g., 4326)' }]}
+                        rules={[{ required: true, message: 'Please select a CRS' }]}
                     >
-                        <Input type='number' placeholder='EPSG code (e.g., 4326)' />
+                        <Select
+                            placeholder='Select a CRS'
+                            options={[
+                                { value: 'EPSG:4326', label: 'WGS84 (EPSG:4326) - Global' },
+                                { value: 'EPSG:3857', label: 'Web Mercator (EPSG:3857) - Online Maps' },
+                                { value: 'EPSG:4269', label: 'NAD83 (EPSG:4269) - North America' },
+                                { value: 'EPSG:27700', label: 'OSGB36 (EPSG:27700) - Great Britain' },
+                                { value: 'EPSG:4258', label: 'ETRS89 (EPSG:4258) - Europe' },
+                                { value: 'EPSG:4283', label: 'GDA94 (EPSG:4283) - Australia' },
+                                { value: 'EPSG:7844', label: 'GDA2020 (EPSG:7844) - Australia (Updated)' },
+                                { value: 'EPSG:28992', label: 'Amersfoort (EPSG:28992) - Netherlands' },
+                            ]}
+                        />
                     </Form.Item>
 
                     <Form.Item
